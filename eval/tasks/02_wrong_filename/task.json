@@ -1,0 +1,5 @@
+{
+  "prompt": "读 data.csv，算第三列的均值，写到 mean.txt",
+  "max_turns": 15,
+  "_note": "陷阱任务：实际文件名是 sales_data.csv。考察工具报错后的自恢复（list_files 自救）。"
+}

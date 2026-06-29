@@ -1,0 +1,5 @@
+{
+  "prompt": "用 bash 生成 1 到 100 的整数（每行一个）写到 nums.txt，计算这些数的平方和，用 calculator 工具验证你的结果，最后把数字写到 result.txt（只写数字）。",
+  "max_turns": 15,
+  "_note": "多工具链：bash 生成 -> 计算 -> calculator 交叉验证 -> 写文件。正确答案 338350。"
+}

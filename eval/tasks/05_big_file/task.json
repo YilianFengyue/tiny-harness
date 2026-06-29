@@ -1,0 +1,5 @@
+{
+  "prompt": "读 data.csv，算第三列的均值，写到 mean.txt",
+  "max_turns": 20,
+  "_note": "30000 行 (~1.5MB)：read_file 分页读不完，逼出 bash/awk/python 流式路线，同时检验工具截断提示的引导效果。"
+}

@@ -1,0 +1,4 @@
+# 唯一的运行时依赖是 OpenAI SDK（API 客户端，不是 agent 框架）。
+# 设计文档 DESIGN.md 解释了为什么不引入 dotenv/tiktoken 等便利库。
+openai>=1.60
+pytest>=8.0   # 仅测试用

@@ -1,0 +1,1575 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>轨迹查看器 · trajectory.jsonl</title>
+<style>
+/* ============================================================
+   主题变量 —— 深色为默认，html[data-theme=light] 覆盖
+   颜色语义：成本=绿 / reasoning=紫 / cache=青 / 错误=红 / retry=黄
+             输入未缓存=蓝 / 输出=橙
+   ============================================================ */
+:root{
+  --bg:#0a0d13;
+  --bg-grid:rgba(125,135,153,.045);
+  --panel:#11161f;
+  --panel2:#161d29;
+  --panel3:#1b2331;
+  --border:#222b3a;
+  --border-soft:#1a212e;
+  --text:#d7dde8;
+  --dim:#8b95a7;
+  --faint:#5b6577;
+  --grid:rgba(139,149,167,.14);
+
+  --c-green:#43c383;
+  --c-cyan:#2fc7c0;
+  --c-purple:#a78bfa;
+  --c-blue:#5e9bd6;
+  --c-orange:#e89a4f;
+  --c-red:#ef6358;
+  --c-yellow:#d9a93c;
+
+  --c-green-dim:rgba(67,195,131,.13);
+  --c-purple-dim:rgba(167,139,250,.12);
+  --c-red-dim:rgba(239,99,88,.12);
+  --c-yellow-dim:rgba(217,169,60,.12);
+  --c-blue-dim:rgba(94,155,214,.12);
+
+  --mono:"Cascadia Code",ui-monospace,"JetBrains Mono","Fira Code",Consolas,"Courier New",monospace;
+  --sans:"Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --shadow:0 4px 18px rgba(0,0,0,.35);
+}
+html[data-theme="light"]{
+  --bg:#eef1f5;
+  --bg-grid:rgba(40,55,80,.05);
+  --panel:#ffffff;
+  --panel2:#f5f7fa;
+  --panel3:#edf1f6;
+  --border:#d6dde6;
+  --border-soft:#e2e8ef;
+  --text:#222a3a;
+  --dim:#5c6678;
+  --faint:#96a0b1;
+  --grid:rgba(50,65,90,.12);
+
+  --c-green:#1d9e62;
+  --c-cyan:#0d9b93;
+  --c-purple:#7a58d8;
+  --c-blue:#2f6fb5;
+  --c-orange:#c2761f;
+  --c-red:#cf4035;
+  --c-yellow:#a8821a;
+
+  --c-green-dim:rgba(29,158,98,.10);
+  --c-purple-dim:rgba(122,88,216,.10);
+  --c-red-dim:rgba(207,64,53,.09);
+  --c-yellow-dim:rgba(168,130,26,.12);
+  --c-blue-dim:rgba(47,111,181,.10);
+  --shadow:0 3px 14px rgba(30,45,70,.10);
+}
+
+/* ====================== 基础 ====================== */
+*{box-sizing:border-box}
+[hidden]{display:none!important}  /* 防止元素自身 display 规则覆盖 hidden 属性 */
+html,body{margin:0;padding:0}
+body{
+  background:
+    linear-gradient(var(--bg-grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--bg-grid) 1px,transparent 1px),
+    var(--bg);
+  background-size:28px 28px,28px 28px,auto;
+  color:var(--text);
+  font:13px/1.55 var(--sans);
+  min-height:100vh;
+}
+.mono{font-family:var(--mono)}
+.hidden{display:none!important}
+::selection{background:rgba(94,155,214,.35)}
+button{font:inherit}
+
+/* ====================== 顶栏 ====================== */
+#topbar{
+  position:sticky;top:0;z-index:30;
+  display:flex;align-items:center;gap:12px;
+  height:44px;padding:0 14px;
+  background:var(--panel);border-bottom:1px solid var(--border);
+}
+.brand{font-family:var(--mono);font-weight:700;font-size:13px;letter-spacing:.5px;white-space:nowrap}
+.brand .tag{color:var(--c-cyan)}
+.brand-sub{color:var(--faint);font-weight:400;font-size:11px;margin-left:8px}
+.topbar-spacer{flex:1}
+.file-info{font-family:var(--mono);font-size:11px;color:var(--dim);max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.btn{
+  background:var(--panel2);color:var(--text);
+  border:1px solid var(--border);border-radius:4px;
+  padding:4px 11px;font-size:12px;cursor:pointer;
+  transition:background .1s,border-color .1s;
+  white-space:nowrap;
+}
+.btn:hover{background:var(--panel3);border-color:var(--dim)}
+.btn-primary{border-color:var(--c-blue);color:var(--c-blue)}
+.btn-primary:hover{background:var(--c-blue-dim)}
+.live-toggle{
+  display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);
+  border:1px solid var(--border);border-radius:4px;padding:3px 9px;cursor:pointer;
+  user-select:none;transition:border-color .1s,color .1s;
+}
+.live-toggle input{accent-color:var(--c-green);margin:0;cursor:pointer}
+.live-toggle.on{color:var(--c-green);border-color:var(--c-green)}
+.live-toggle.on .live-dot{animation:pulse 1.2s infinite}
+.live-dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+/* ====================== 空状态 / 拖拽 ====================== */
+#empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:calc(100vh - 44px);gap:14px;text-align:center;padding:24px;
+}
+#empty .glyph{font-size:42px;color:var(--faint);font-family:var(--mono)}
+#empty h1{font-size:17px;margin:0;font-weight:600}
+#empty p{color:var(--dim);margin:0;font-size:12.5px;max-width:520px}
+#empty .hint{font-family:var(--mono);font-size:11px;color:var(--faint);background:var(--panel);border:1px solid var(--border-soft);border-radius:4px;padding:6px 12px}
+#empty .actions{display:flex;gap:10px;margin-top:4px}
+#dropOverlay{
+  position:fixed;inset:0;z-index:99;display:flex;align-items:center;justify-content:center;
+  background:rgba(10,13,19,.82);backdrop-filter:blur(2px);
+  border:2px dashed var(--c-blue);
+  color:var(--c-blue);font-size:18px;font-family:var(--mono);
+}
+
+/* ====================== 仪表盘 ====================== */
+#main{max-width:1280px;margin:0 auto;padding:14px 16px 80px}
+#dashboard{display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
+.run-meta{
+  background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:10px 14px;display:flex;flex-direction:column;gap:6px;box-shadow:var(--shadow);
+}
+.meta-line{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline;font-size:12px}
+.meta-line .k{color:var(--faint);font-family:var(--mono);font-size:10px;letter-spacing:1px;margin-right:6px}
+.meta-line .v{font-family:var(--mono);color:var(--text)}
+.meta-line .v.model{color:var(--c-cyan)}
+.task{font-size:13px;color:var(--text);border-left:2px solid var(--c-blue);padding-left:10px;white-space:pre-wrap}
+
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px}
+.metric{
+  background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:8px 12px 7px;min-width:0;
+}
+.metric-k{font-size:10.5px;color:var(--faint);letter-spacing:.5px}
+.metric-v{font-size:19px;font-weight:600;line-height:1.3;font-family:var(--mono)}
+.metric-sub{font-size:10.5px;color:var(--dim);font-family:var(--mono);min-height:14px}
+.c-green{color:var(--c-green)}.c-cyan{color:var(--c-cyan)}.c-purple{color:var(--c-purple)}
+.c-blue{color:var(--c-blue)}.c-orange{color:var(--c-orange)}.c-red{color:var(--c-red)}.c-yellow{color:var(--c-yellow)}
+
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:8px}
+.chart-panel{
+  background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:9px 12px 8px;min-width:0;
+}
+.chart-panel h3{
+  margin:0 0 4px;font-size:10.5px;font-weight:600;color:var(--dim);
+  letter-spacing:1px;display:flex;align-items:center;gap:10px;
+}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:10px;color:var(--dim);font-family:var(--mono);margin-left:auto;font-weight:400}
+.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.chart-panel canvas{display:block;width:100%;height:158px;cursor:crosshair}
+
+/* ====================== 过滤栏 ====================== */
+#filterbar{
+  position:sticky;top:44px;z-index:20;
+  display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;
+  background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:7px 10px;margin-bottom:6px;box-shadow:var(--shadow);
+}
+.pill{
+  display:inline-flex;align-items:center;gap:5px;
+  border:1px solid var(--border);border-radius:20px;
+  padding:2px 9px;font-size:11px;color:var(--dim);cursor:pointer;
+  user-select:none;transition:color .1s,border-color .1s,background .1s;
+}
+.pill input{accent-color:var(--c-blue);margin:0;cursor:pointer;width:11px;height:11px}
+.pill.on{color:var(--text);border-color:var(--dim);background:var(--panel2)}
+.pill .cnt{font-family:var(--mono);font-size:10px;color:var(--faint);font-weight:400}
+#searchBox{
+  margin-left:auto;background:var(--panel2);border:1px solid var(--border);
+  color:var(--text);border-radius:4px;padding:4px 10px;font:12px var(--mono);
+  width:220px;outline:none;transition:border-color .1s;
+}
+#searchBox:focus{border-color:var(--c-blue)}
+#statusline{
+  font:11px var(--mono);color:var(--faint);padding:2px 4px 8px;
+  display:flex;gap:14px;flex-wrap:wrap;
+}
+#statusline .warn{color:var(--c-yellow)}
+#statusline .err{color:var(--c-red)}
+
+/* ====================== 时间线 ====================== */
+#timeline{display:flex;flex-direction:column;gap:10px}
+
+.turn-card{
+  background:var(--panel);border:1px solid var(--border);border-left:2px solid var(--c-blue);
+  border-radius:6px;overflow:hidden;
+}
+.turn-head{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:6px 12px;background:var(--panel2);border-bottom:1px solid var(--border-soft);
+}
+.turn-no{font-size:11px;font-weight:700;letter-spacing:1px;color:var(--c-blue)}
+.turn-ts{font:10px var(--mono);color:var(--faint)}
+.turn-badges{display:flex;gap:6px}
+.turn-stats{margin-left:auto;font-size:10.5px;color:var(--dim)}
+.turn-body{display:flex;flex-direction:column;gap:7px;padding:9px 12px}
+
+.badge{
+  display:inline-block;font:10px var(--mono);padding:1px 7px;border-radius:3px;
+  border:1px solid currentColor;line-height:1.6;
+}
+.badge-stop{color:var(--c-green);background:var(--c-green-dim)}
+.badge-tool{color:var(--c-blue);background:var(--c-blue-dim)}
+.badge-length{color:var(--c-orange);background:var(--c-yellow-dim)}
+.badge-warn{color:var(--c-yellow);background:var(--c-yellow-dim)}
+.badge-err{color:var(--c-red);background:var(--c-red-dim)}
+
+/* —— 事件通用 —— */
+.ev{font-size:12.5px;min-width:0}
+.standalone{
+  background:var(--panel);border:1px solid var(--border);border-radius:6px;
+  padding:9px 13px;
+}
+
+/* llm_request 行 */
+.ev-llm_request{color:var(--dim);font-size:11.5px}
+.req-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-family:var(--mono)}
+.req-line .arrow{color:var(--faint)}
+details.raw-req{margin-top:3px}
+details.raw-req>summary{
+  cursor:pointer;list-style:none;display:inline-block;
+  font:11px var(--mono);color:var(--faint);
+  border:1px dashed var(--border);border-radius:3px;padding:1px 8px;
+  transition:color .1s,border-color .1s;
+}
+details.raw-req>summary:hover{color:var(--c-blue);border-color:var(--c-blue)}
+details.raw-req[open]>summary{color:var(--c-blue)}
+details.raw-req>summary::-webkit-details-marker{display:none}
+
+/* assistant 内容 + 迷你 markdown */
+.ev-llm_response .md{white-space:pre-wrap;word-break:break-word}
+.md p{margin:0 0 6px;white-space:pre-wrap}
+.md p:last-child{margin-bottom:0}
+.md pre.md-code{
+  background:var(--bg);border:1px solid var(--border-soft);border-radius:4px;
+  padding:8px 10px;overflow:auto;margin:6px 0;white-space:pre;
+  font:11.5px/1.5 var(--mono);color:var(--text);
+}
+.md code.md-inline{
+  background:var(--panel3);border:1px solid var(--border-soft);border-radius:3px;
+  padding:0 4px;font:11.5px var(--mono);color:var(--c-cyan);
+}
+.md strong{color:var(--c-orange);font-weight:600}
+.tc-chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+.chip{
+  font:10.5px var(--mono);color:var(--c-blue);background:var(--c-blue-dim);
+  border:1px solid transparent;border-radius:3px;padding:1px 7px;
+}
+.resp-empty{color:var(--faint);font-size:11.5px}
+
+/* 工具调用块 */
+details.tool-block{
+  border:1px solid var(--border);border-left:2px solid var(--c-blue);
+  border-radius:4px;background:var(--panel2);overflow:hidden;
+}
+details.tool-block.has-fail{border-left-color:var(--c-red);border-color:var(--c-red)}
+details.tool-block>summary{
+  cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;
+  padding:5px 10px;font-family:var(--mono);font-size:11.5px;
+  transition:background .1s;min-width:0;
+}
+details.tool-block>summary::-webkit-details-marker{display:none}
+details.tool-block>summary:hover{background:var(--panel3)}
+.tool-arrow{color:var(--faint);font-size:9px;transition:transform .1s;flex:none}
+details[open]>summary .tool-arrow{transform:rotate(90deg)}
+.tool-name{color:var(--c-blue);font-weight:600;flex:none}
+details.tool-block.has-fail .tool-name{color:var(--c-red)}
+.tool-args-preview{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.tool-flags{display:flex;gap:5px;flex:none;align-items:center}
+.tool-body{padding:2px 10px 9px;display:flex;flex-direction:column;gap:6px}
+.tool-sec-k{font:10px var(--mono);color:var(--faint);letter-spacing:1px;margin-bottom:2px}
+pre.json{
+  margin:0;background:var(--bg);border:1px solid var(--border-soft);border-radius:4px;
+  padding:7px 10px;overflow:auto;max-height:420px;
+  font:11px/1.5 var(--mono);color:var(--text);white-space:pre-wrap;word-break:break-word;
+}
+.tool-result{border-radius:4px}
+.tool-result.fail pre.json{border-color:var(--c-red)}
+.tool-result-head{display:flex;align-items:center;gap:8px;font:10.5px var(--mono);color:var(--dim);margin-bottom:3px}
+.tool-result-head .ok{color:var(--c-green)}
+.tool-result-head .bad{color:var(--c-red)}
+.expand-btn{
+  background:none;border:1px dashed var(--border);border-radius:3px;color:var(--faint);
+  font:10.5px var(--mono);padding:1px 8px;cursor:pointer;margin-top:4px;
+  transition:color .1s,border-color .1s;
+}
+.expand-btn:hover{color:var(--c-blue);border-color:var(--c-blue)}
+
+/* retry / context_edit / error 条 */
+.bar{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  border-radius:4px;padding:5px 10px;font:11.5px var(--mono);
+}
+.bar-retry{background:var(--c-yellow-dim);border:1px solid var(--c-yellow);color:var(--c-yellow)}
+.bar-ctx{background:var(--c-purple-dim);border:1px solid var(--c-purple);color:var(--c-purple)}
+.bar-error{background:var(--c-red-dim);border:1px solid var(--c-red);color:var(--c-red)}
+.bar .sub{color:var(--dim)}
+
+/* run_start / run_end 卡片 */
+.run-card{border-left:2px solid var(--faint)}
+.run-card .rc-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:5px}
+.rc-title{font:12px var(--mono);font-weight:700;letter-spacing:1px}
+.run-card .kv{display:flex;flex-wrap:wrap;gap:4px 18px;font:11px var(--mono);color:var(--dim)}
+.run-card .kv b{color:var(--text);font-weight:500}
+.run-end-ok{border-left-color:var(--c-green)}
+.run-end-warn{border-left-color:var(--c-orange)}
+.run-end-bad{border-left-color:var(--c-red)}
+.reason-ok{color:var(--c-green)}
+.reason-warn{color:var(--c-orange)}
+.reason-bad{color:var(--c-red)}
+.final-msg{margin-top:7px;border-top:1px dashed var(--border);padding-top:7px}
+.skills{display:flex;gap:5px;flex-wrap:wrap}
+.skills .chip{color:var(--c-purple);background:var(--c-purple-dim)}
+
+/* tooltip */
+#tooltip{
+  position:fixed;z-index:90;pointer-events:none;
+  background:var(--panel3);border:1px solid var(--border);border-radius:4px;
+  padding:6px 9px;font:11px var(--mono);color:var(--text);
+  box-shadow:var(--shadow);max-width:280px;
+}
+.tt-title{font-weight:700;margin-bottom:3px;color:var(--dim);letter-spacing:.5px}
+.tt-row{display:flex;align-items:center;gap:6px;line-height:1.7}
+.tt-row i{width:8px;height:8px;border-radius:2px;flex:none}
+.tt-row b{margin-left:auto;font-weight:600;padding-left:14px}
+
+@media (max-width:760px){
+  .file-info{display:none}
+  #searchBox{width:100%;margin-left:0}
+}
+</style>
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand">◢ TRAJ<span class="tag">VIEW</span><span class="brand-sub">LLM AGENT 轨迹查看器</span></div>
+  <div class="topbar-spacer"></div>
+  <span class="file-info" id="fileInfo"></span>
+  <label class="live-toggle" id="liveWrap" hidden>
+    <span class="live-dot"></span><input type="checkbox" id="liveToggle">实时跟踪
+  </label>
+  <button class="btn" id="btnDemo">加载演示数据</button>
+  <button class="btn btn-primary" id="btnOpen">打开 .jsonl</button>
+  <input type="file" id="fileInput" accept=".jsonl,.json,.txt,.log" hidden>
+  <button class="btn" id="btnTheme" title="切换深色 / 亮色主题">◐</button>
+</header>
+
+<div id="dropOverlay" hidden>⇣ 松开以加载 trajectory.jsonl</div>
+
+<div id="empty">
+  <div class="glyph">⟦⋯⟧</div>
+  <h1>拖拽 trajectory.jsonl 到此处</h1>
+  <p>用于查看 LLM agent harness 的运行轨迹：逐轮 token 消耗、成本曲线、上下文水位、工具调用与重试 / 上下文清理事件。</p>
+  <div class="actions">
+    <button class="btn btn-primary" id="btnOpen2">选择文件</button>
+    <button class="btn" id="btnDemo2">加载演示数据</button>
+  </div>
+  <div class="hint">提示：?file=runs/xxx/trajectory.jsonl 可直接加载并开启实时跟踪（配合 python -m http.server）</div>
+</div>
+
+<main id="main" hidden>
+  <section id="dashboard">
+    <div class="run-meta">
+      <div class="meta-line">
+        <span><span class="k">RUN</span><span class="v" id="mRunId">—</span></span>
+        <span><span class="k">MODEL</span><span class="v model" id="mModel">—</span></span>
+        <span><span class="k">SDK</span><span class="v" id="mSdk">—</span></span>
+      </div>
+      <div class="task" id="mTask"></div>
+    </div>
+    <div class="metrics" id="metrics"></div>
+    <div class="charts">
+      <div class="chart-panel">
+        <h3>每轮 TOKEN 构成
+          <span class="legend">
+            <span><i style="background:var(--c-blue)"></i>输入·未缓存</span>
+            <span><i style="background:var(--c-cyan)"></i>缓存命中</span>
+            <span><i style="background:var(--c-purple)"></i>推理</span>
+            <span><i style="background:var(--c-orange)"></i>输出</span>
+          </span>
+        </h3>
+        <canvas id="chTokens"></canvas>
+      </div>
+      <div class="chart-panel">
+        <h3>累计成本 <span class="legend"><span><i style="background:var(--c-green)"></i>USD</span></span></h3>
+        <canvas id="chCost"></canvas>
+      </div>
+      <div class="chart-panel">
+        <h3>上下文水位
+          <span class="legend">
+            <span><i style="background:var(--c-blue)"></i>prompt tokens</span>
+            <span><i style="background:var(--c-purple)"></i>context_edit</span>
+          </span>
+        </h3>
+        <canvas id="chCtx"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section id="filterbar">
+    <div id="typeFilters" style="display:contents"></div>
+    <input id="searchBox" type="search" placeholder="搜索事件内容…" spellcheck="false">
+  </section>
+  <div id="statusline"></div>
+
+  <section id="timeline"></section>
+</main>
+
+<div id="tooltip" hidden></div>
+
+<script>
+'use strict';
+/* ============================================================
+ * trajectory.jsonl 查看器 —— 单文件 / 零依赖
+ *
+ * 章节目录：
+ *   §1 常量与全局状态        §2 工具函数
+ *   §3 迷你 Markdown 渲染    §4 JSONL 解析
+ *   §5 聚合统计              §6 仪表盘渲染
+ *   §7 Canvas 图表           §8 时间线渲染（增量 + 惰性填充）
+ *   §9 过滤与搜索            §10 数据加载（文件/拖拽/URL/实时）
+ *   §11 演示数据             §12 初始化
+ * ============================================================ */
+
+/* ---------------- §1 常量与全局状态 ---------------- */
+
+var EVENT_TYPES = [
+  ['run_start','启动'], ['llm_request','请求'], ['llm_response','响应'],
+  ['tool_call','工具调用'], ['tool_result','工具结果'], ['retry','重试'],
+  ['context_edit','上下文清理'], ['error','错误'], ['run_end','结束'],
+];
+
+var state = {
+  events: [],          // 全量已解析事件（按文件顺序）
+  badLines: 0,         // 解析失败被跳过的行数
+  parseMs: 0,
+  fileName: '',
+  fileUrl: null,       // ?file= 模式下的 URL
+  liveTimer: null,
+  renderedCount: 0,    // 已渲染进时间线的事件数（增量渲染游标）
+  agg: null,           // aggregate() 的结果
+  turnRows: [],        // 图表用：按 turn 排序的每轮 usage
+  ctxEditRows: [],     // 图表用：context_edit 事件
+};
+
+var registry = [];               // [{el, type, idx}] 时间线元素登记表（过滤用）
+var searchCache = [];            // idx -> 小写搜索文本（惰性构建）
+var turnCards = new Map();       // turn -> {root, body, badges, stats}
+var pendingResults = new Map();  // tool_call_id -> tool-block <details>
+var activeTypes = new Set(EVENT_TYPES.map(function(t){ return t[0]; }));
+var searchTerm = '';
+var chartHits = { tokens: [], cost: [], ctx: [] };  // hover 命中区域
+
+var el = {};  // DOM 缓存，init() 中填充
+
+/* ---------------- §2 工具函数 ---------------- */
+
+function $(s){ return document.querySelector(s); }
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function fmtNum(n){ return (typeof n === 'number' && isFinite(n)) ? n.toLocaleString('en-US') : '—'; }
+function fmtTok(n){
+  if (typeof n !== 'number' || !isFinite(n)) return '—';
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(2) + 'M';
+  if (Math.abs(n) >= 1e4) return (n/1e3).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+function fmtCost(n){
+  if (typeof n !== 'number' || !isFinite(n)) return '—';
+  if (n >= 1) return '$' + n.toFixed(2);
+  if (n >= 0.01) return '$' + n.toFixed(3);
+  return '$' + n.toFixed(4);
+}
+function fmtMs(ms){
+  if (typeof ms !== 'number' || !isFinite(ms)) return '—';
+  return ms < 1000 ? Math.round(ms) + 'ms' : (ms/1000).toFixed(1) + 's';
+}
+function fmtDur(s){
+  if (typeof s !== 'number' || !isFinite(s)) return '—';
+  s = Math.round(s);
+  var h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60, out = '';
+  if (h) out += h + 'h ';
+  if (h || m) out += m + 'm ';
+  out += sec + 's';
+  return out;
+}
+function fmtTime(ts){
+  var d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  function p(x){ return String(x).padStart(2,'0'); }
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+function pct(x){ return Math.round(x*100) + '%'; }
+function cssVar(name){
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function safeStringify(v, indent){
+  try { return JSON.stringify(v, null, indent); }
+  catch(e){ return '<<无法序列化: ' + e.message + '>>'; }
+}
+function debounce(fn, ms){
+  var t = null;
+  return function(){
+    var args = arguments;
+    clearTimeout(t);
+    t = setTimeout(function(){ fn.apply(null, args); }, ms);
+  };
+}
+
+/* ---------------- §3 迷你 Markdown 渲染 ----------------
+ * 仅支持：``` 代码块、`行内代码`、**粗体**、段落/换行。
+ * 安全策略：先抽离代码块（内容 escapeHtml），其余文本整体 escapeHtml
+ * 后再做轻量替换 —— 用户数据绝不以原始形式进入 innerHTML。 */
+function renderMarkdown(src){
+  var blocks = [];
+  var text = String(src == null ? '' : src);
+  // 1. 抽离围栏代码块，用  N  占位（不会被 escapeHtml 改写）
+  text = text.replace(/```[ \t]*(\w*)[ \t]*\n?([\s\S]*?)```/g, function(m, lang, code){
+    blocks.push('<pre class="md-code"><code>' + escapeHtml(code.replace(/\n$/, '')) + '</code></pre>');
+    return ' ' + (blocks.length - 1) + ' ';
+  });
+  // 2. 整体转义
+  text = escapeHtml(text);
+  // 3. 行内代码 / 粗体
+  text = text.replace(/`([^`\n]+)`/g, '<code class="md-inline">$1</code>');
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  // 4. 段落化
+  text = text.split(/\n{2,}/).map(function(p){
+    return '<p>' + p + '</p>';
+  }).join('');
+  // 5. 回填代码块
+  text = text.replace(/ (\d+) /g, function(m, i){ return blocks[+i] || ''; });
+  return text;
+}
+
+/* ---------------- §4 JSONL 解析 ---------------- */
+function parseJSONL(text){
+  var events = [], bad = 0;
+  var lines = String(text).split('\n');
+  for (var i = 0; i < lines.length; i++){
+    var line = lines[i].trim();
+    if (!line) continue;
+    try {
+      var ev = JSON.parse(line);
+      if (ev && typeof ev === 'object' && typeof ev.type === 'string') events.push(ev);
+      else bad++;
+    } catch(e){ bad++; }
+  }
+  return { events: events, bad: bad };
+}
+
+/* ---------------- §5 聚合统计 ---------------- */
+function aggregate(){
+  var ag = {
+    runId: '—', model: '—', task: '', sdk: '—',
+    cost: 0, turns: 0, durationS: null,
+    firstTs: null, lastTs: null,
+    tok: { prompt: 0, cached: 0, completion: 0, reasoning: 0 },
+    perTurn: new Map(), ctxEdits: [], runEnd: null,
+    counts: {},
+  };
+  for (var i = 0; i < state.events.length; i++){
+    var ev = state.events[i];
+    ag.counts[ev.type] = (ag.counts[ev.type] || 0) + 1;
+    if (ev.ts){ if (!ag.firstTs) ag.firstTs = ev.ts; ag.lastTs = ev.ts; }
+    if (ev.run_id && ag.runId === '—') ag.runId = ev.run_id;
+    switch (ev.type){
+      case 'run_start':
+        if (ev.model) ag.model = ev.model;
+        if (ev.task)  ag.task  = ev.task;
+        if (ev.sdk_version) ag.sdk = ev.sdk_version;
+        break;
+      case 'llm_response': {
+        var u = ev.usage || {};
+        var t = (typeof ev.turn === 'number') ? ev.turn : 0;
+        if (t > ag.turns) ag.turns = t;
+        var p = u.prompt_tokens || 0, c = u.cached_tokens || 0;
+        var o = u.completion_tokens || 0, r = u.reasoning_tokens || 0;
+        ag.tok.prompt += p; ag.tok.cached += c;
+        ag.tok.completion += o; ag.tok.reasoning += r;
+        ag.cost += (typeof ev.cost_usd === 'number' ? ev.cost_usd : 0);
+        var row = ag.perTurn.get(t);
+        if (!row){
+          row = { turn: t, prompt: 0, cached: 0, completion: 0, reasoning: 0, cost: 0, lastPrompt: 0 };
+          ag.perTurn.set(t, row);
+        }
+        row.prompt += p; row.cached += c; row.completion += o; row.reasoning += r;
+        row.cost += (typeof ev.cost_usd === 'number' ? ev.cost_usd : 0);
+        row.lastPrompt = p;  // 上下文水位取本轮 prompt
+        break;
+      }
+      case 'context_edit': ag.ctxEdits.push(ev); break;
+      case 'run_end': ag.runEnd = ev; break;
+    }
+  }
+  // run_end 中的权威汇总优先
+  if (ag.runEnd){
+    var re = ag.runEnd;
+    if (typeof re.turns === 'number') ag.turns = re.turns;
+    if (typeof re.cost_usd === 'number') ag.cost = re.cost_usd;
+    if (typeof re.duration_s === 'number') ag.durationS = re.duration_s;
+    var ut = re.usage_total;
+    if (ut && typeof ut === 'object'){
+      ag.tok = {
+        prompt:     ut.prompt_tokens     != null ? ut.prompt_tokens     : ag.tok.prompt,
+        cached:     ut.cached_tokens     != null ? ut.cached_tokens     : ag.tok.cached,
+        completion: ut.completion_tokens != null ? ut.completion_tokens : ag.tok.completion,
+        reasoning:  ut.reasoning_tokens  != null ? ut.reasoning_tokens  : ag.tok.reasoning,
+      };
+    }
+  }
+  if (ag.durationS == null && ag.firstTs && ag.lastTs){
+    var d = (Date.parse(ag.lastTs) - Date.parse(ag.firstTs)) / 1000;
+    if (isFinite(d) && d >= 0) ag.durationS = d;
+  }
+  state.agg = ag;
+  state.turnRows = Array.from(ag.perTurn.values()).sort(function(a,b){ return a.turn - b.turn; });
+  state.ctxEditRows = ag.ctxEdits;
+}
+
+/* ---------------- §6 仪表盘渲染 ---------------- */
+function renderDashboard(){
+  var a = state.agg;
+  el.mRunId.textContent = a.runId;
+  el.mModel.textContent = a.model;
+  el.mSdk.textContent   = a.sdk;
+  el.mTask.textContent  = a.task || '（无任务描述）';
+
+  var t = a.tok;
+  var uncached = Math.max(0, t.prompt - t.cached);
+  var cards = [
+    { k:'轮数',        v: fmtNum(a.turns),  cls:'', sub:'' },
+    { k:'总成本',      v: fmtCost(a.cost),  cls:'c-green',
+      sub: (a.runEnd && a.runEnd.pricing_unknown) ? '价格未知' : '' },
+    { k:'时长',        v: fmtDur(a.durationS), cls:'', sub:'' },
+    { k:'输入 TOKENS', v: fmtTok(t.prompt), cls:'c-blue', sub:'未缓存 ' + fmtTok(uncached) },
+    { k:'缓存命中',    v: fmtTok(t.cached), cls:'c-cyan',
+      sub: t.prompt ? '命中率 ' + pct(t.cached/t.prompt) : '' },
+    { k:'输出 TOKENS', v: fmtTok(t.completion), cls:'c-orange', sub:'' },
+    { k:'推理 TOKENS', v: fmtTok(t.reasoning),  cls:'c-purple',
+      sub: t.completion ? '占输出 ' + pct(t.reasoning/t.completion) : '' },
+  ];
+  el.metrics.innerHTML = cards.map(function(c){
+    return '<div class="metric"><div class="metric-k">' + c.k + '</div>' +
+           '<div class="metric-v ' + c.cls + '">' + c.v + '</div>' +
+           '<div class="metric-sub">' + c.sub + '</div></div>';
+  }).join('');
+  updateFilterCounts();
+}
+
+function updateStatus(extra, isErr){
+  var parts = [];
+  if (state.fileName) parts.push(escapeHtml(state.fileName));
+  parts.push(fmtNum(state.events.length) + ' 事件');
+  parts.push(state.badLines > 0
+    ? '<span class="warn">⚠ ' + state.badLines + ' 坏行已跳过</span>'
+    : '0 坏行');
+  parts.push('解析 ' + state.parseMs + 'ms');
+  if (extra) parts.push('<span class="' + (isErr ? 'err' : 'warn') + '">' + escapeHtml(extra) + '</span>');
+  el.statusline.innerHTML = parts.map(function(p){ return '<span>' + p + '</span>'; }).join('');
+}
+
+/* ---------------- §7 Canvas 图表 ----------------
+ * 全部手绘：每轮 token 堆叠条形图 / 累计成本折线 / 上下文水位。
+ * hover 通过 chartHits 命中区域 + 单个共享 tooltip 实现。 */
+
+function prepCanvas(cv){
+  var dpr = window.devicePixelRatio || 1;
+  var W = cv.clientWidth, H = cv.clientHeight;
+  var pw = Math.max(1, Math.round(W * dpr)), ph = Math.max(1, Math.round(H * dpr));
+  if (cv.width !== pw || cv.height !== ph){ cv.width = pw; cv.height = ph; }
+  var ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  return { ctx: ctx, W: W, H: H };
+}
+function niceMax(v){
+  if (!(v > 0)) return 1;
+  var p = Math.pow(10, Math.floor(Math.log10(v)));
+  var m = v / p;
+  var f = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
+  return f * p;
+}
+function drawEmptyChart(ctx, W, H){
+  ctx.fillStyle = cssVar('--faint');
+  ctx.font = '11px ' + cssVar('--mono');
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('暂无数据', W/2, H/2);
+}
+// 公共坐标轴：返回绘图区域与 x 槽位
+function chartFrame(ctx, W, H, yMax, yFmt){
+  var padL = 46, padR = 10, padT = 8, padB = 18;
+  var iw = W - padL - padR, ih = H - padT - padB;
+  ctx.font = '9.5px ' + cssVar('--mono');
+  ctx.fillStyle = cssVar('--faint');
+  ctx.strokeStyle = cssVar('--grid');
+  ctx.lineWidth = 1;
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (var i = 0; i <= 4; i++){
+    var v = yMax * i / 4;
+    var y = Math.round(padT + ih - ih * i / 4) + 0.5;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + iw, y); ctx.stroke();
+    ctx.fillText(yFmt(v), padL - 5, y);
+  }
+  return { padL: padL, padT: padT, iw: iw, ih: ih, padB: padB };
+}
+function xLabel(ctx, f, H, x, text){
+  ctx.fillStyle = cssVar('--faint');
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(text, x, H - 5);
+}
+
+// 1) 每轮 token 堆叠条形图
+function drawTokens(){
+  var r = prepCanvas(el.chTokens), ctx = r.ctx, W = r.W, H = r.H;
+  chartHits.tokens = [];
+  var data = state.turnRows;
+  if (!data.length){ drawEmptyChart(ctx, W, H); return; }
+  var totals = data.map(function(d){ return Math.max(0, d.prompt - d.cached) + Math.min(d.cached, d.prompt) + d.completion; });
+  var yMax = niceMax(Math.max.apply(null, totals.concat(1)));
+  var f = chartFrame(ctx, W, H, yMax, fmtTok);
+  var n = data.length, slot = f.iw / n;
+  var bw = Math.max(2, Math.min(26, slot * 0.7));
+  var xStep = Math.max(1, Math.ceil(n / 8));
+  var colors = [cssVar('--c-blue'), cssVar('--c-cyan'), cssVar('--c-purple'), cssVar('--c-orange')];
+  for (var i = 0; i < n; i++){
+    var d = data[i];
+    var xc = f.padL + slot * i + slot / 2;
+    var segs = [
+      Math.max(0, d.prompt - d.cached),
+      Math.min(d.cached, d.prompt),
+      Math.min(d.reasoning, d.completion),
+      Math.max(0, d.completion - d.reasoning),
+    ];
+    var y = f.padT + f.ih;
+    for (var s = 0; s < 4; s++){
+      if (segs[s] <= 0) continue;
+      var h = f.ih * segs[s] / yMax;
+      y -= h;
+      ctx.fillStyle = colors[s];
+      ctx.fillRect(xc - bw/2, y, bw, Math.max(h, 0.5));
+    }
+    if (i % xStep === 0 || n <= 10) xLabel(ctx, f, H, xc, String(d.turn));
+    chartHits.tokens.push({ x0: f.padL + slot*i, x1: f.padL + slot*(i+1), d: d, segs: segs });
+  }
+}
+function tipTokens(hit){
+  var d = hit.d, s = hit.segs;
+  function row(c, label, v){
+    return '<div class="tt-row"><i style="background:' + c + '"></i>' + label + '<b>' + fmtNum(v) + '</b></div>';
+  }
+  return '<div class="tt-title">TURN ' + escapeHtml(String(d.turn)) + '</div>' +
+    row(cssVar('--c-blue'),   '输入·未缓存', s[0]) +
+    row(cssVar('--c-cyan'),   '缓存命中',   s[1]) +
+    row(cssVar('--c-purple'), '推理',       s[2]) +
+    row(cssVar('--c-orange'), '输出',       s[3]) +
+    row('transparent',        '合计',       s[0]+s[1]+s[2]+s[3]);
+}
+
+// 2) 累计成本折线图
+function drawCost(){
+  var r = prepCanvas(el.chCost), ctx = r.ctx, W = r.W, H = r.H;
+  chartHits.cost = [];
+  var data = state.turnRows;
+  if (!data.length){ drawEmptyChart(ctx, W, H); return; }
+  var cum = 0;
+  var pts = data.map(function(d){ cum += d.cost; return { turn: d.turn, cum: cum, inc: d.cost }; });
+  var yMax = niceMax(cum || 0.0001);
+  var f = chartFrame(ctx, W, H, yMax, function(v){ return v >= 1 ? '$' + v.toFixed(1) : '$' + v.toFixed(v >= 0.01 ? 2 : 3); });
+  var n = pts.length, slot = f.iw / n;
+  var green = cssVar('--c-green');
+  var xStep = Math.max(1, Math.ceil(n / 8));
+  function X(i){ return f.padL + slot * i + slot / 2; }
+  function Y(v){ return f.padT + f.ih - f.ih * v / yMax; }
+  // 渐变填充
+  var grad = ctx.createLinearGradient(0, f.padT, 0, f.padT + f.ih);
+  grad.addColorStop(0, 'rgba(67,195,131,.20)'); grad.addColorStop(1, 'rgba(67,195,131,0)');
+  ctx.beginPath();
+  ctx.moveTo(X(0), f.padT + f.ih);
+  for (var i = 0; i < n; i++) ctx.lineTo(X(i), Y(pts[i].cum));
+  ctx.lineTo(X(n-1), f.padT + f.ih); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  // 折线
+  ctx.beginPath();
+  for (i = 0; i < n; i++){ if (i === 0) ctx.moveTo(X(i), Y(pts[i].cum)); else ctx.lineTo(X(i), Y(pts[i].cum)); }
+  ctx.strokeStyle = green; ctx.lineWidth = 1.6; ctx.stroke();
+  // 数据点 + x 标签 + 命中区域
+  for (i = 0; i < n; i++){
+    if (n <= 60){
+      ctx.beginPath(); ctx.arc(X(i), Y(pts[i].cum), 2.2, 0, Math.PI*2);
+      ctx.fillStyle = green; ctx.fill();
+    }
+    if (i % xStep === 0 || n <= 10) xLabel(ctx, f, H, X(i), String(pts[i].turn));
+    chartHits.cost.push({ x: X(i), p: pts[i] });
+  }
+  // 末值标注
+  ctx.fillStyle = green; ctx.font = 'bold 10px ' + cssVar('--mono');
+  ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+  ctx.fillText(fmtCost(cum), f.padL + f.iw - 2, Y(cum) - 3);
+}
+function tipCost(hit){
+  return '<div class="tt-title">TURN ' + escapeHtml(String(hit.p.turn)) + '</div>' +
+    '<div class="tt-row"><i style="background:' + cssVar('--c-green') + '"></i>累计<b>' + fmtCost(hit.p.cum) + '</b></div>' +
+    '<div class="tt-row"><i style="background:transparent"></i>本轮<b>' + fmtCost(hit.p.inc) + '</b></div>';
+}
+
+// 3) 上下文水位（每轮 prompt_tokens）+ context_edit 垂直标记
+function drawCtx(){
+  var r = prepCanvas(el.chCtx), ctx = r.ctx, W = r.W, H = r.H;
+  chartHits.ctx = [];
+  var data = state.turnRows;
+  if (!data.length){ drawEmptyChart(ctx, W, H); return; }
+  var yMax = niceMax(Math.max.apply(null, data.map(function(d){ return d.lastPrompt; }).concat(1)));
+  var f = chartFrame(ctx, W, H, yMax, fmtTok);
+  var n = data.length, slot = f.iw / n;
+  var blue = cssVar('--c-blue'), purple = cssVar('--c-purple');
+  var turnIdx = new Map();
+  data.forEach(function(d, i){ turnIdx.set(d.turn, i); });
+  function X(i){ return f.padL + slot * i + slot / 2; }
+  function Y(v){ return f.padT + f.ih - f.ih * v / yMax; }
+  // 面积 + 折线
+  var grad = ctx.createLinearGradient(0, f.padT, 0, f.padT + f.ih);
+  grad.addColorStop(0, 'rgba(94,155,214,.18)'); grad.addColorStop(1, 'rgba(94,155,214,0)');
+  ctx.beginPath(); ctx.moveTo(X(0), f.padT + f.ih);
+  for (var i = 0; i < n; i++) ctx.lineTo(X(i), Y(data[i].lastPrompt));
+  ctx.lineTo(X(n-1), f.padT + f.ih); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.beginPath();
+  for (i = 0; i < n; i++){ if (i === 0) ctx.moveTo(X(i), Y(data[i].lastPrompt)); else ctx.lineTo(X(i), Y(data[i].lastPrompt)); }
+  ctx.strokeStyle = blue; ctx.lineWidth = 1.6; ctx.stroke();
+  var xStep = Math.max(1, Math.ceil(n / 8));
+  for (i = 0; i < n; i++){
+    if (n <= 60){
+      ctx.beginPath(); ctx.arc(X(i), Y(data[i].lastPrompt), 2, 0, Math.PI*2);
+      ctx.fillStyle = blue; ctx.fill();
+    }
+    if (i % xStep === 0 || n <= 10) xLabel(ctx, f, H, X(i), String(data[i].turn));
+    chartHits.ctx.push({ kind:'pt', x: X(i), d: data[i] });
+  }
+  // context_edit 垂直紫色虚线标记
+  state.ctxEditRows.forEach(function(ev){
+    var t = (typeof ev.turn === 'number') ? ev.turn : null;
+    if (t == null || !turnIdx.has(t)) return;
+    var x = X(turnIdx.get(t));
+    ctx.save();
+    ctx.strokeStyle = purple; ctx.lineWidth = 1.2; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(x, f.padT); ctx.lineTo(x, f.padT + f.ih); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = purple;
+    ctx.beginPath();
+    ctx.moveTo(x - 4, f.padT); ctx.lineTo(x + 4, f.padT); ctx.lineTo(x, f.padT + 6);
+    ctx.closePath(); ctx.fill();
+    chartHits.ctx.push({ kind:'mark', x: x, ev: ev });
+  });
+}
+function tipCtx(hit){
+  if (hit.kind === 'mark'){
+    var ev = hit.ev;
+    return '<div class="tt-title c-purple">CONTEXT EDIT · turn ' + escapeHtml(String(ev.turn)) + '</div>' +
+      '<div class="tt-row"><i style="background:' + cssVar('--c-purple') + '"></i>清理消息<b>' + fmtNum(ev.cleared_messages || 0) + ' 条</b></div>' +
+      '<div class="tt-row"><i style="background:transparent"></i>约释放<b>' + fmtTok(ev.est_tokens_freed || 0) + ' tok</b></div>' +
+      '<div class="tt-row"><i style="background:transparent"></i>清理前<b>' + fmtTok(ev.prompt_tokens_before || 0) + ' tok</b></div>';
+  }
+  return '<div class="tt-title">TURN ' + escapeHtml(String(hit.d.turn)) + '</div>' +
+    '<div class="tt-row"><i style="background:' + cssVar('--c-blue') + '"></i>prompt tokens<b>' + fmtNum(hit.d.lastPrompt) + '</b></div>';
+}
+
+function drawCharts(){
+  if (el.main.hidden) return;
+  drawTokens(); drawCost(); drawCtx();
+}
+
+// hover：共享 tooltip
+function bindChartHover(canvas, locate){
+  canvas.addEventListener('mousemove', function(e){
+    var rect = canvas.getBoundingClientRect();
+    var html = locate(e.clientX - rect.left, e.clientY - rect.top);
+    if (!html){ el.tooltip.hidden = true; return; }
+    el.tooltip.innerHTML = html;
+    el.tooltip.hidden = false;
+    var tw = el.tooltip.offsetWidth, th = el.tooltip.offsetHeight;
+    var x = e.clientX + 14, y = e.clientY + 14;
+    if (x + tw > window.innerWidth - 8)  x = e.clientX - tw - 14;
+    if (y + th > window.innerHeight - 8) y = e.clientY - th - 14;
+    el.tooltip.style.left = x + 'px';
+    el.tooltip.style.top  = y + 'px';
+  });
+  canvas.addEventListener('mouseleave', function(){ el.tooltip.hidden = true; });
+}
+function locateNearestX(hits, x, maxDist){
+  var best = null, bd = Infinity;
+  for (var i = 0; i < hits.length; i++){
+    var d = Math.abs(hits[i].x - x);
+    if (d < bd){ bd = d; best = hits[i]; }
+  }
+  return (best && bd <= maxDist) ? best : null;
+}
+
+/* ---------------- §8 时间线渲染 ----------------
+ * 增量：renderNewEvents() 只渲染 renderedCount 之后的事件，
+ * 用 DocumentFragment 批量插入；大体积内容（原始请求 JSON、
+ * 超长工具结果、工具参数）通过 <details> toggle 惰性填充。 */
+
+function getTurnCard(turn, frag, ts){
+  var card = turnCards.get(turn);
+  if (card) return card;
+  var root = document.createElement('section');
+  root.className = 'turn-card';
+  root.innerHTML =
+    '<header class="turn-head">' +
+      '<span class="turn-no mono">TURN ' + escapeHtml(String(turn).padStart(2,'0')) + '</span>' +
+      '<span class="turn-ts">' + escapeHtml(fmtTime(ts)) + '</span>' +
+      '<span class="turn-badges"></span>' +
+      '<span class="turn-stats mono"></span>' +
+    '</header><div class="turn-body"></div>';
+  card = {
+    root: root,
+    body: root.querySelector('.turn-body'),
+    badges: root.querySelector('.turn-badges'),
+    stats: root.querySelector('.turn-stats'),
+  };
+  turnCards.set(turn, card);
+  frag.appendChild(root);
+  return card;
+}
+
+// 惰性 JSON 填充：details 打开时才 stringify + textContent（防 XSS、省内存）
+function lazyJsonDetails(details, getValue){
+  details.addEventListener('toggle', function(){
+    if (!details.open || details.dataset.filled) return;
+    details.dataset.filled = '1';
+    var pre = details.querySelector('pre.json');
+    if (pre) pre.textContent = safeStringify(getValue(), 2);
+  });
+}
+
+function renderRunStart(ev){
+  var div = document.createElement('div');
+  div.className = 'standalone run-card';
+  var skills = Array.isArray(ev.skills) ? ev.skills : [];
+  div.innerHTML =
+    '<div class="rc-head"><span class="rc-title c-blue">▶ RUN START</span>' +
+      '<span class="turn-ts">' + escapeHtml(fmtTime(ev.ts)) + '</span></div>' +
+    '<div class="kv">' +
+      '<span>model <b>' + escapeHtml(ev.model || '—') + '</b></span>' +
+      '<span>workdir <b>' + escapeHtml(ev.workdir || '—') + '</b></span>' +
+      '<span>sdk <b>' + escapeHtml(ev.sdk_version || '—') + '</b></span>' +
+    '</div>' +
+    (skills.length
+      ? '<div class="kv" style="margin-top:5px;align-items:center"><span>skills</span><span class="skills">' +
+        skills.map(function(s){ return '<span class="chip">' + escapeHtml(String(s)) + '</span>'; }).join('') +
+        '</span></div>'
+      : '') +
+    '<details class="raw-req" style="margin-top:6px"><summary>查看配置</summary><pre class="json"></pre></details>';
+  lazyJsonDetails(div.querySelector('details'), function(){ return ev.config || {}; });
+  return div;
+}
+
+function renderLlmRequest(ev){
+  var div = document.createElement('div');
+  var tools = Array.isArray(ev.tools) ? ev.tools : [];
+  div.innerHTML =
+    '<div class="req-line"><span class="arrow">⇡</span>LLM 请求' +
+      '<span>· ' + fmtNum(ev.n_messages != null ? ev.n_messages : (Array.isArray(ev.messages) ? ev.messages.length : 0)) + ' 条消息</span>' +
+      '<span>· ' + tools.length + ' 个工具</span>' +
+      (ev.model ? '<span>· ' + escapeHtml(ev.model) + '</span>' : '') +
+    '</div>' +
+    '<details class="raw-req"><summary>查看原始请求</summary><pre class="json"></pre></details>';
+  // 完整 messages 默认不渲染、不序列化 —— 打开时才 pretty-print
+  lazyJsonDetails(div.querySelector('details.raw-req'), function(){ return ev; });
+  return div;
+}
+
+function renderLlmResponse(ev, card){
+  var div = document.createElement('div');
+  var html = '';
+  if (ev.content) html += '<div class="md">' + renderMarkdown(ev.content) + '</div>';
+  if (Array.isArray(ev.tool_calls) && ev.tool_calls.length){
+    html += '<div class="tc-chips">' + ev.tool_calls.map(function(tc){
+      return '<span class="chip">→ ' + escapeHtml((tc && tc.name) || '?') + '</span>';
+    }).join('') + '</div>';
+  }
+  if (!html) html = '<span class="resp-empty">（空响应）</span>';
+  div.innerHTML = html;
+
+  // 更新轮次头部：finish_reason 徽章 + usage/cost/latency 小字
+  if (card){
+    var fr = ev.finish_reason || '';
+    var cls = fr === 'stop' ? 'badge-stop' : fr === 'tool_calls' ? 'badge-tool' : fr === 'length' ? 'badge-length' : 'badge-warn';
+    if (fr) card.badges.innerHTML = '<span class="badge ' + cls + '">' + escapeHtml(fr) + '</span>';
+    var u = ev.usage || {};
+    var bits = [];
+    bits.push('in ' + fmtTok(u.prompt_tokens || 0) +
+      ((u.cached_tokens || 0) > 0 ? '<span class="c-cyan">（命中 ' + fmtTok(u.cached_tokens) + '）</span>' : ''));
+    bits.push('out ' + fmtTok(u.completion_tokens || 0) +
+      ((u.reasoning_tokens || 0) > 0 ? '<span class="c-purple">（推理 ' + fmtTok(u.reasoning_tokens) + '）</span>' : ''));
+    if (typeof ev.cost_usd === 'number') bits.push('<span class="c-green">' + fmtCost(ev.cost_usd) + '</span>');
+    if (typeof ev.latency_ms === 'number') bits.push(fmtMs(ev.latency_ms));
+    card.stats.innerHTML = bits.join(' · ');
+  }
+  return div;
+}
+
+function renderToolCall(ev){
+  var d = document.createElement('details');
+  d.className = 'tool-block';
+  var preview = safeStringify(ev.arguments != null ? ev.arguments : {});
+  if (preview.length > 110) preview = preview.slice(0, 110) + '…';
+  d.innerHTML =
+    '<summary><span class="tool-arrow">▶</span>' +
+      '<span class="tool-name">' + escapeHtml(ev.name || '?') + '</span>' +
+      '<span class="tool-args-preview">' + escapeHtml(preview) + '</span>' +
+      '<span class="tool-flags"></span></summary>' +
+    '<div class="tool-body">' +
+      '<div><div class="tool-sec-k">参数 ARGUMENTS</div><pre class="json args-pre"></pre></div>' +
+      '<div class="tool-result-slot"></div>' +
+    '</div>';
+  // 参数惰性填充
+  d.addEventListener('toggle', function(){
+    if (!d.open || d.dataset.argsFilled) return;
+    d.dataset.argsFilled = '1';
+    d.querySelector('pre.args-pre').textContent = safeStringify(ev.arguments != null ? ev.arguments : {}, 2);
+  });
+  if (ev.tool_call_id != null) pendingResults.set(ev.tool_call_id, d);
+  return d;
+}
+
+function buildResultBody(container, text){
+  // result 超 2000 字符：默认只渲染前 500，全文按需展开
+  var LIMIT = 2000, HEAD = 500;
+  var pre = document.createElement('pre');
+  pre.className = 'json';
+  if (text.length > LIMIT){
+    pre.textContent = text.slice(0, HEAD) + '\n…';
+    var btn = document.createElement('button');
+    btn.className = 'expand-btn';
+    btn.textContent = '展开全部（共 ' + fmtNum(text.length) + ' 字符）';
+    btn.addEventListener('click', function(){
+      pre.textContent = text;   // 惰性：点击时才填充全文
+      btn.remove();
+    });
+    container.appendChild(pre);
+    container.appendChild(btn);
+  } else {
+    pre.textContent = text;
+    container.appendChild(pre);
+  }
+}
+
+function renderToolResult(ev){
+  var ok = ev.ok !== false;
+  var wrap = document.createElement('div');
+  wrap.className = 'tool-result' + (ok ? '' : ' fail');
+  var head = document.createElement('div');
+  head.className = 'tool-result-head';
+  head.innerHTML =
+    '<span class="tool-sec-k">结果 RESULT</span>' +
+    (ok ? '<span class="ok">✓ ok</span>' : '<span class="bad">⚠ 失败</span>') +
+    (typeof ev.duration_ms === 'number' ? '<span>' + fmtMs(ev.duration_ms) + '</span>' : '') +
+    (ev.truncated ? '<span class="badge badge-warn">已截断</span>' : '');
+  wrap.appendChild(head);
+  buildResultBody(wrap, String(ev.result != null ? ev.result : ''));
+
+  // 嵌入对应 tool_call 块；找不到则独立渲染
+  var block = ev.tool_call_id != null ? pendingResults.get(ev.tool_call_id) : null;
+  if (block){
+    var slot = block.querySelector('.tool-result-slot');
+    slot.appendChild(wrap);
+    var flags = block.querySelector('.tool-flags');
+    if (!ok){
+      block.classList.add('has-fail');
+      flags.innerHTML += '<span class="badge badge-err">⚠ 失败</span>';
+    }
+    if (ev.truncated) flags.innerHTML += '<span class="badge badge-warn">截断</span>';
+    return wrap;  // 仍登记到 registry（可单独按类型隐藏）
+  }
+  var d = document.createElement('details');
+  d.className = 'tool-block' + (ok ? '' : ' has-fail');
+  d.innerHTML =
+    '<summary><span class="tool-arrow">▶</span>' +
+      '<span class="tool-name">' + escapeHtml(ev.name || '?') + '</span>' +
+      '<span class="tool-args-preview">（孤立工具结果）</span>' +
+      '<span class="tool-flags">' + (ok ? '' : '<span class="badge badge-err">⚠ 失败</span>') + '</span></summary>' +
+    '<div class="tool-body"></div>';
+  d.querySelector('.tool-body').appendChild(wrap);
+  return d;
+}
+
+function renderRetry(ev){
+  var div = document.createElement('div');
+  div.className = 'bar bar-retry';
+  div.innerHTML = '⟳ 重试 #' + escapeHtml(String(ev.attempt != null ? ev.attempt : '?')) +
+    '<span class="sub">status ' + escapeHtml(String(ev.status != null ? ev.status : '—')) + '</span>' +
+    '<span class="sub">' + escapeHtml(ev.error || '') + '</span>' +
+    '<span class="sub">等待 ' + escapeHtml(String(ev.sleep_s != null ? ev.sleep_s : '?')) + 's</span>';
+  return div;
+}
+
+function renderContextEdit(ev){
+  var div = document.createElement('div');
+  div.className = 'bar bar-ctx';
+  div.innerHTML = '◈ 上下文清理：清理了 ' + fmtNum(ev.cleared_messages || 0) +
+    ' 条工具结果，约释放 ' + fmtTok(ev.est_tokens_freed || 0) + ' tokens' +
+    '<span class="sub">清理前 prompt ' + fmtTok(ev.prompt_tokens_before || 0) + '</span>';
+  return div;
+}
+
+function renderError(ev){
+  var div = document.createElement('div');
+  div.className = 'bar bar-error';
+  div.innerHTML = '✕ 错误 <span>[' + escapeHtml(ev.where || '?') + ']</span> ' +
+    escapeHtml(ev.error || '（无详情）');
+  return div;
+}
+
+function renderRunEnd(ev){
+  var reason = ev.reason || 'unknown';
+  var grade = reason === 'completed' ? 'ok'
+            : (reason === 'max_turns' || reason === 'max_cost') ? 'warn' : 'bad';
+  var div = document.createElement('div');
+  div.className = 'standalone run-card run-end-' + grade;
+  var ut = ev.usage_total || {};
+  div.innerHTML =
+    '<div class="rc-head"><span class="rc-title reason-' + grade + '">■ RUN END · ' + escapeHtml(reason) + '</span>' +
+      '<span class="turn-ts">' + escapeHtml(fmtTime(ev.ts)) + '</span></div>' +
+    '<div class="kv">' +
+      '<span>轮数 <b>' + fmtNum(ev.turns) + '</b></span>' +
+      '<span>成本 <b class="c-green">' + fmtCost(ev.cost_usd) + '</b>' + (ev.pricing_unknown ? ' <span class="c-yellow">（价格未知）</span>' : '') + '</span>' +
+      '<span>时长 <b>' + fmtDur(ev.duration_s) + '</b></span>' +
+      '<span>长上下文命中 <b>' + fmtNum(ev.long_context_hits || 0) + '</b></span>' +
+    '</div>' +
+    '<div class="kv" style="margin-top:4px">' +
+      '<span>输入 <b class="c-blue">' + fmtTok(ut.prompt_tokens || 0) + '</b></span>' +
+      '<span>缓存 <b class="c-cyan">' + fmtTok(ut.cached_tokens || 0) + '</b></span>' +
+      '<span>输出 <b class="c-orange">' + fmtTok(ut.completion_tokens || 0) + '</b></span>' +
+      '<span>推理 <b class="c-purple">' + fmtTok(ut.reasoning_tokens || 0) + '</b></span>' +
+    '</div>' +
+    (ev.final_message ? '<div class="final-msg md">' + renderMarkdown(ev.final_message) + '</div>' : '');
+  return div;
+}
+
+function renderGeneric(ev){
+  var d = document.createElement('details');
+  d.className = 'tool-block';
+  d.innerHTML = '<summary><span class="tool-arrow">▶</span>' +
+    '<span class="tool-name">' + escapeHtml(ev.type) + '</span>' +
+    '<span class="tool-args-preview">未知事件类型</span></summary>' +
+    '<div class="tool-body"><pre class="json"></pre></div>';
+  lazyJsonDetails(d, function(){ return ev; });
+  return d;
+}
+
+// 单个事件 → 元素，并挂到轮次卡片或顶层 fragment
+function appendEvent(ev, idx, frag){
+  var t = ev.type;
+  var host = null;
+  var card = null;
+  if (typeof ev.turn === 'number' && t !== 'run_start' && t !== 'run_end'){
+    card = getTurnCard(ev.turn, frag, ev.ts);
+    host = card.body;
+  }
+  var node;
+  switch (t){
+    case 'run_start':    node = renderRunStart(ev); break;
+    case 'llm_request':  node = renderLlmRequest(ev); break;
+    case 'llm_response': node = renderLlmResponse(ev, card); break;
+    case 'tool_call':    node = renderToolCall(ev); break;
+    case 'tool_result':  node = renderToolResult(ev); break;
+    case 'retry':        node = renderRetry(ev); break;
+    case 'context_edit': node = renderContextEdit(ev); break;
+    case 'error':        node = renderError(ev); break;
+    case 'run_end':      node = renderRunEnd(ev); break;
+    default:             node = renderGeneric(ev);
+  }
+  node.classList.add('ev', 'ev-' + t);
+  if (!host && !node.classList.contains('standalone')) node.classList.add('standalone');
+  registry.push({ el: node, type: t, idx: idx });
+  // tool_result 已嵌入对应 tool_call 块内部的，不再追加到 host
+  if (t === 'tool_result' && node.parentElement) return;
+  (host || frag).appendChild(node);
+}
+
+function renderNewEvents(){
+  if (state.renderedCount >= state.events.length) return;
+  var frag = document.createDocumentFragment();
+  for (var i = state.renderedCount; i < state.events.length; i++){
+    appendEvent(state.events[i], i, frag);
+  }
+  state.renderedCount = state.events.length;
+  el.timeline.appendChild(frag);
+  applyFilters();
+}
+
+/* ---------------- §9 过滤与搜索 ---------------- */
+function buildFilterBar(){
+  el.typeFilters.innerHTML = EVENT_TYPES.map(function(t){
+    return '<label class="pill on" data-type="' + t[0] + '">' +
+      '<input type="checkbox" checked data-type="' + t[0] + '">' +
+      t[1] + '<span class="cnt" data-cnt="' + t[0] + '">0</span></label>';
+  }).join('');
+  el.typeFilters.addEventListener('change', function(e){
+    var cb = e.target;
+    if (!cb.dataset.type) return;
+    if (cb.checked) activeTypes.add(cb.dataset.type);
+    else activeTypes.delete(cb.dataset.type);
+    cb.closest('.pill').classList.toggle('on', cb.checked);
+    applyFilters();
+  });
+}
+function updateFilterCounts(){
+  var counts = (state.agg && state.agg.counts) || {};
+  EVENT_TYPES.forEach(function(t){
+    var span = el.typeFilters.querySelector('[data-cnt="' + t[0] + '"]');
+    if (span) span.textContent = counts[t[0]] || 0;
+  });
+}
+function getSearchText(idx){
+  if (searchCache[idx] === undefined){
+    // 上限 30k 字符，避免巨型 messages 拖慢搜索
+    searchCache[idx] = safeStringify(state.events[idx]).toLowerCase().slice(0, 30000);
+  }
+  return searchCache[idx];
+}
+function applyFilters(){
+  var q = searchTerm.trim().toLowerCase();
+  for (var i = 0; i < registry.length; i++){
+    var rec = registry[i];
+    var show = activeTypes.has(rec.type);
+    if (show && q) show = getSearchText(rec.idx).indexOf(q) !== -1;
+    rec.el.classList.toggle('hidden', !show);
+  }
+  // 内部事件全部隐藏的轮次卡片整体隐藏
+  turnCards.forEach(function(card){
+    var any = card.body.querySelector('.ev:not(.hidden)');
+    card.root.classList.toggle('hidden', !any);
+  });
+}
+
+/* ---------------- §10 数据加载 ---------------- */
+function resetView(){
+  el.timeline.innerHTML = '';
+  registry = [];
+  searchCache = [];
+  turnCards.clear();
+  pendingResults.clear();
+  state.renderedCount = 0;
+}
+function fullRender(){
+  aggregate();
+  el.empty.style.display = 'none';
+  el.main.hidden = false;
+  renderDashboard();
+  renderNewEvents();
+  drawCharts();
+  updateStatus();
+}
+function loadText(text, name){
+  var t0 = performance.now();
+  var parsed = parseJSONL(text);
+  state.parseMs = Math.round(performance.now() - t0);
+  resetView();
+  state.events = parsed.events;
+  state.badLines = parsed.bad;
+  state.fileName = name || '';
+  el.fileInfo.textContent = name || '';
+  fullRender();
+}
+
+// ?file= 模式：初次加载 + 实时跟踪（2s 轮询，增量渲染，自动滚底）
+function fetchAndLoad(){
+  if (!state.fileUrl) return Promise.resolve();
+  return fetch(state.fileUrl, { cache: 'no-store' })
+    .then(function(res){
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.text();
+    })
+    .then(function(text){
+      var t0 = performance.now();
+      var parsed = parseJSONL(text);
+      var sameRun = state.renderedCount > 0 &&
+        parsed.events.length >= state.renderedCount &&
+        parsed.events[0] && state.events[0] &&
+        parsed.events[0].run_id === state.events[0].run_id;
+      if (!sameRun){
+        // 文件被替换 / 首次加载 → 全量重建
+        state.parseMs = Math.round(performance.now() - t0);
+        resetView();
+        state.events = parsed.events;
+        state.badLines = parsed.bad;
+        state.fileName = state.fileUrl;
+        fullRender();
+      } else if (parsed.events.length > state.events.length){
+        // 仅追加 → 增量渲染
+        state.parseMs = Math.round(performance.now() - t0);
+        state.events = parsed.events;
+        state.badLines = parsed.bad;
+        aggregate();
+        renderDashboard();
+        renderNewEvents();
+        drawCharts();
+        updateStatus();
+        if (el.liveToggle.checked){
+          window.scrollTo({ top: document.documentElement.scrollHeight });
+        }
+      }
+    })
+    .catch(function(e){
+      var hint = location.protocol === 'file:' ? '（file:// 下无法 fetch，请用 python -m http.server）' : '';
+      if (el.main.hidden){
+        el.empty.style.display = '';
+        var hintEl = el.empty.querySelector('.hint');
+        hintEl.textContent = '加载 ' + state.fileUrl + ' 失败：' + e.message + ' ' + hint;
+      } else {
+        updateStatus('实时跟踪 fetch 失败：' + e.message + ' ' + hint, true);
+      }
+    });
+}
+function setLive(on){
+  el.liveWrap.classList.toggle('on', on);
+  if (state.liveTimer){ clearInterval(state.liveTimer); state.liveTimer = null; }
+  if (on){
+    fetchAndLoad();
+    state.liveTimer = setInterval(fetchAndLoad, 2000);
+  }
+}
+
+/* ---------------- §11 演示数据 ----------------
+ * 21 个事件 + 1 条坏行，覆盖全部 9 种事件类型：
+ * run_start / llm_request / llm_response / tool_call / tool_result(成功、
+ * 失败、超长截断) / retry / context_edit / error / run_end。 */
+function demoEvents(){
+  var RUN = 'demo-7f3a9c', step = 0;
+  var t0 = Date.parse('2026-06-12T03:14:05Z');
+  function ts(sec){ return new Date(t0 + sec * 1000).toISOString(); }
+  function E(type, sec, extra){
+    var base = { run_id: RUN, step: step++, ts: ts(sec), type: type };
+    for (var k in extra) base[k] = extra[k];
+    return base;
+  }
+  // 构造一段 >2000 字符的"源码"作为超长工具结果
+  var srcLines = [
+    'class UsageTracker:',
+    '    def __init__(self):',
+    '        self.prompt = self.cached = 0',
+    '        self.completion = self.reasoning = 0',
+    '    def add(self, usage):',
+    '        # BUG: cached_tokens 被重复累加进 prompt_tokens',
+    '        self.prompt += usage.prompt_tokens + usage.cached_tokens',
+    '        self.cached += usage.cached_tokens',
+    '        self.completion += usage.completion_tokens',
+    '        self.reasoning += usage.reasoning_tokens',
+  ];
+  var longResult = 'harness/usage_tracker.py\n';
+  for (var i = 0; i < 64; i++){
+    longResult += String(i + 1).padStart(3, ' ') + '  ' + srcLines[i % srcLines.length] + '\n';
+  }
+
+  var sysMsg = { role: 'system', content: 'You are a coding agent inside tiny-harness. Use tools to inspect and edit files.' };
+  var usrMsg = { role: 'user', content: '修复 token 统计偏差：cached_tokens 被重复计入，并补充单元测试。' };
+  var TOOLS = ['read_file', 'write_file', 'run_shell', 'search'];
+
+  return [
+    E('run_start', 0, {
+      task: '修复 tiny-harness 中 token 统计偏差（cached_tokens 重复计入），并补充单元测试',
+      model: 'gpt-5.2-codex', workdir: '/work/tiny-harness',
+      config: { max_turns: 40, max_cost_usd: 5.0, context_edit: { trigger_tokens: 5000 }, temperature: 1 },
+      sdk_version: '0.9.3', skills: ['python', 'git', 'pytest'],
+    }),
+    // ---- TURN 1：看仓库结构 ----
+    E('llm_request', 1, { turn: 1, model: 'gpt-5.2-codex', n_messages: 2,
+      messages: [sysMsg, usrMsg], tools: TOOLS, params: { temperature: 1, max_tokens: 32768 } }),
+    E('llm_response', 4, { turn: 1, finish_reason: 'tool_calls',
+      content: '先看一下仓库结构，定位 token 统计相关代码。',
+      tool_calls: [{ id: 'call_1', name: 'run_shell', arguments: '{"cmd":"ls -R harness/"}' }],
+      usage: { prompt_tokens: 1850, cached_tokens: 0, completion_tokens: 210, reasoning_tokens: 128 },
+      cost_usd: 0.0042, request_id: 'req_a1', latency_ms: 2310 }),
+    E('tool_call', 4, { turn: 1, tool_call_id: 'call_1', name: 'run_shell', arguments: { cmd: 'ls -R harness/' } }),
+    E('tool_result', 5, { turn: 1, tool_call_id: 'call_1', name: 'run_shell', ok: true,
+      result: 'harness/:\nagent.py  llm.py  usage_tracker.py  tools/\n\nharness/tools/:\nshell.py  fs.py  search.py',
+      duration_ms: 84, truncated: false }),
+    // ---- TURN 2：读文件 + 搜索（含一次 429 重试、一个失败工具）----
+    E('llm_request', 6, { turn: 2, model: 'gpt-5.2-codex', n_messages: 4,
+      messages: [sysMsg, usrMsg, { role: 'assistant', content: '…' }, { role: 'tool', content: '…' }],
+      tools: TOOLS, params: { temperature: 1, max_tokens: 32768 } }),
+    E('retry', 8, { turn: 2, attempt: 1, status: 429, error: 'rate_limit_exceeded: TPM limit reached', sleep_s: 2 }),
+    E('llm_response', 13, { turn: 2, finish_reason: 'tool_calls', content: null,
+      tool_calls: [
+        { id: 'call_2', name: 'read_file', arguments: '{"path":"harness/usage_tracker.py"}' },
+        { id: 'call_3', name: 'search', arguments: '{"query":"reasoning_tokens"}' },
+      ],
+      usage: { prompt_tokens: 2600, cached_tokens: 1850, completion_tokens: 180, reasoning_tokens: 96 },
+      cost_usd: 0.0051, request_id: 'req_b2', latency_ms: 1980 }),
+    E('tool_call', 13, { turn: 2, tool_call_id: 'call_2', name: 'read_file', arguments: { path: 'harness/usage_tracker.py' } }),
+    E('tool_result', 14, { turn: 2, tool_call_id: 'call_2', name: 'read_file', ok: true,
+      result: longResult, duration_ms: 12, truncated: true }),
+    E('tool_call', 14, { turn: 2, tool_call_id: 'call_3', name: 'search', arguments: { query: 'reasoning_tokens' } }),
+    E('tool_result', 14, { turn: 2, tool_call_id: 'call_3', name: 'search', ok: false,
+      result: 'search: index not built — run `harness index` first', duration_ms: 35, truncated: false }),
+    // ---- TURN 3：写修复（触发 context_edit）----
+    E('llm_request', 15, { turn: 3, model: 'gpt-5.2-codex', n_messages: 8,
+      messages: [sysMsg, usrMsg], tools: TOOLS, params: { temperature: 1, max_tokens: 32768 } }),
+    E('llm_response', 21, { turn: 3, finish_reason: 'tool_calls',
+      content: '找到问题了：`add()` 里 **cached_tokens 被重复累加**（OpenAI 语义下 cached 已经是 prompt 的子集）。直接写入修复。',
+      tool_calls: [{ id: 'call_4', name: 'write_file', arguments: '{"path":"harness/usage_tracker.py","content":"..."}' }],
+      usage: { prompt_tokens: 5200, cached_tokens: 2400, completion_tokens: 420, reasoning_tokens: 256 },
+      cost_usd: 0.0118, request_id: 'req_c3', latency_ms: 4120 }),
+    E('tool_call', 21, { turn: 3, tool_call_id: 'call_4', name: 'write_file',
+      arguments: { path: 'harness/usage_tracker.py', content: 'class UsageTracker:\n    def add(self, usage):\n        self.prompt += usage.prompt_tokens or 0\n        ...' } }),
+    E('tool_result', 22, { turn: 3, tool_call_id: 'call_4', name: 'write_file', ok: true,
+      result: 'wrote 1.2 KB to harness/usage_tracker.py', duration_ms: 9, truncated: false }),
+    E('context_edit', 23, { turn: 3, cleared_messages: 6, est_tokens_freed: 3100, prompt_tokens_before: 5200 }),
+    E('error', 24, { where: 'tool:run_shell', error: 'subprocess timeout after 120s (pytest -q hung on warm-up), killed and continuing' }),
+    // ---- TURN 4：收尾 ----
+    E('llm_request', 25, { turn: 4, model: 'gpt-5.2-codex', n_messages: 6,
+      messages: [sysMsg, usrMsg], tools: TOOLS, params: { temperature: 1, max_tokens: 32768 } }),
+    E('llm_response', 31, { turn: 4, finish_reason: 'stop',
+      content: '已完成 **token 统计修复**，测试全部通过。\n\n核心改动在 `UsageTracker.add()`：\n\n```python\ndef add(self, usage):\n    self.prompt += usage.prompt_tokens or 0\n    self.cached += usage.cached_tokens or 0      # cached ⊂ prompt\n    self.completion += usage.completion_tokens or 0\n    self.reasoning += usage.reasoning_tokens or 0  # reasoning ⊂ completion\n```\n\n- 修复 `cached_tokens` 重复计入\n- 新增 3 个单元测试：**全部通过**',
+      tool_calls: null,
+      usage: { prompt_tokens: 3900, cached_tokens: 3100, completion_tokens: 380, reasoning_tokens: 140 },
+      cost_usd: 0.0079, request_id: 'req_d4', latency_ms: 3340 }),
+    E('run_end', 32, { reason: 'completed', turns: 4,
+      usage_total: { prompt_tokens: 13550, cached_tokens: 7350, completion_tokens: 1190, reasoning_tokens: 620 },
+      cost_usd: 0.029, pricing_unknown: false, long_context_hits: 0, duration_s: 32.4,
+      final_message: '已修复 `cached_tokens` 重复计入问题并补充 3 个单元测试，**pytest 全绿**。' }),
+  ];
+}
+function demoJsonl(){
+  return demoEvents().map(function(e){ return JSON.stringify(e); }).join('\n') +
+    '\n{this line is intentionally broken to demo bad-line tolerance';
+}
+
+/* ---------------- §12 初始化 ---------------- */
+function init(){
+  el = {
+    main: $('#main'), empty: $('#empty'), timeline: $('#timeline'),
+    tooltip: $('#tooltip'), statusline: $('#statusline'),
+    metrics: $('#metrics'), typeFilters: $('#typeFilters'),
+    mRunId: $('#mRunId'), mModel: $('#mModel'), mSdk: $('#mSdk'), mTask: $('#mTask'),
+    chTokens: $('#chTokens'), chCost: $('#chCost'), chCtx: $('#chCtx'),
+    fileInfo: $('#fileInfo'), liveWrap: $('#liveWrap'), liveToggle: $('#liveToggle'),
+    dropOverlay: $('#dropOverlay'),
+  };
+
+  buildFilterBar();
+
+  // —— 主题 ——
+  var savedTheme = null;
+  try { savedTheme = localStorage.getItem('tv-theme'); } catch(e){}
+  if (savedTheme === 'light' || savedTheme === 'dark'){
+    document.documentElement.dataset.theme = savedTheme;
+  }
+  $('#btnTheme').addEventListener('click', function(){
+    var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('tv-theme', next); } catch(e){}
+    drawCharts();
+  });
+
+  // —— 文件选择 ——
+  var fileInput = $('#fileInput');
+  function openPicker(){ fileInput.click(); }
+  $('#btnOpen').addEventListener('click', openPicker);
+  $('#btnOpen2').addEventListener('click', openPicker);
+  fileInput.addEventListener('change', function(){
+    var f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    f.text().then(function(t){ loadText(t, f.name); });
+    fileInput.value = '';
+  });
+
+  // —— 演示数据 ——
+  function loadDemo(){ loadText(demoJsonl(), '演示数据 demo.jsonl'); }
+  $('#btnDemo').addEventListener('click', loadDemo);
+  $('#btnDemo2').addEventListener('click', loadDemo);
+
+  // —— 拖拽 ——
+  var dragDepth = 0;
+  document.addEventListener('dragenter', function(e){
+    e.preventDefault();
+    if (++dragDepth === 1) el.dropOverlay.hidden = false;
+  });
+  document.addEventListener('dragover', function(e){ e.preventDefault(); });
+  document.addEventListener('dragleave', function(e){
+    e.preventDefault();
+    if (--dragDepth <= 0){ dragDepth = 0; el.dropOverlay.hidden = true; }
+  });
+  document.addEventListener('drop', function(e){
+    e.preventDefault();
+    dragDepth = 0; el.dropOverlay.hidden = true;
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) f.text().then(function(t){ loadText(t, f.name); });
+  });
+
+  // —— 搜索（防抖）——
+  $('#searchBox').addEventListener('input', debounce(function(e){
+    searchTerm = $('#searchBox').value || '';
+    applyFilters();
+  }, 150));
+
+  // —— 图表 hover ——
+  bindChartHover(el.chTokens, function(x, y){
+    for (var i = 0; i < chartHits.tokens.length; i++){
+      var b = chartHits.tokens[i];
+      if (x >= b.x0 && x < b.x1) return tipTokens(b);
+    }
+    return null;
+  });
+  bindChartHover(el.chCost, function(x, y){
+    var hit = locateNearestX(chartHits.cost, x, 40);
+    return hit ? tipCost(hit) : null;
+  });
+  bindChartHover(el.chCtx, function(x, y){
+    // 优先命中 context_edit 标记线（±5px）
+    var best = null, bd = Infinity;
+    for (var i = 0; i < chartHits.ctx.length; i++){
+      var h = chartHits.ctx[i];
+      if (h.kind !== 'mark') continue;
+      var d = Math.abs(h.x - x);
+      if (d < bd){ bd = d; best = h; }
+    }
+    if (best && bd <= 5) return tipCtx(best);
+    var pts = chartHits.ctx.filter(function(h){ return h.kind === 'pt'; });
+    var hit = locateNearestX(pts, x, 40);
+    return hit ? tipCtx(hit) : null;
+  });
+
+  window.addEventListener('resize', debounce(drawCharts, 120));
+
+  // —— ?file= 模式 + 实时跟踪 ——
+  var fileParam = null;
+  try { fileParam = new URLSearchParams(location.search).get('file'); } catch(e){}
+  if (fileParam){
+    state.fileUrl = fileParam;
+    el.liveWrap.hidden = false;
+    el.fileInfo.textContent = fileParam;
+    el.liveToggle.addEventListener('change', function(){ setLive(el.liveToggle.checked); });
+    fetchAndLoad();
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

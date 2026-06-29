@@ -1,0 +1,6 @@
+{
+  "prompt": "工作区有 a.csv、b.csv、c.csv 三个文件，分别计算每个文件第二列（value）的均值，把三个均值按 a、b、c 的顺序写到 means.txt，每行一个数字。",
+  "max_turns": 25,
+  "extra_args": ["--context-budget", "6000", "--keep-recent", "2"],
+  "_note": "把 context 预算压到 6K，强制运行中触发工具结果清理——验证清理后任务仍能完成（清理策略的端到端测试）。"
+}

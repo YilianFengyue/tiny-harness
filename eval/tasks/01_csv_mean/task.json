@@ -1,0 +1,4 @@
+{
+  "prompt": "读 data.csv，算第三列的均值，写到 mean.txt",
+  "max_turns": 15
+}
