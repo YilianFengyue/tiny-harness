@@ -63,6 +63,8 @@ class Config:
     # context 预算（token）：超过即触发工具结果清理。240K 给 272K 计费阈值留余量。
     context_budget: int = 240_000
     context_keep_recent: int = 3       # 清理时保留最近 N 条工具结果
+    context_hard_limit: int = 300_000  # 本地估算或上轮真实 input 超过后阻断
+    tool_result_budget_chars: int = 16_000
     reasoning_effort: str | None = None  # none/low/medium/high/xhigh；None=不传，用服务端默认
     max_completion_tokens: int | None = None  # None=服务端默认；推理模型需给推理留 >=25K
     tool_output_limit: int = 20_000    # 工具结果截断阈值（字符）

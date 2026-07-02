@@ -20,6 +20,7 @@ from harness.config import Config, PROJECT_ROOT
 from harness.loop import build_resume_messages, run_agent
 from harness.providers import OpenAIChatProvider, ReplayProvider
 from harness.telemetry import RunLogger, read_trajectory
+from harness.tui import run_tui
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -34,7 +35,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--max-completion-tokens", type=int, default=None)
     p.add_argument("--context-budget", type=int, default=240_000,
                    help="input token 预算，超过触发工具结果清理")
+    p.add_argument("--context-hard-limit", type=int, default=300_000,
+                   help="本地估算或上轮真实 input 超过后阻断")
     p.add_argument("--keep-recent", type=int, default=3, help="清理时保留最近 N 条工具结果")
+    p.add_argument("--tool-result-budget-chars", type=int, default=16_000,
+                   help="单条工具结果进入下一轮前的字符预算")
     p.add_argument("--skill", action="append", default=[],
                    help="注入领域 skill（名字或路径），可重复")
     p.add_argument("--replay", metavar="RUN_ID", help="离线重放该 run 的模型响应")
@@ -61,11 +66,42 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "serve":
         cmd_serve(argv[1:])
         return 0
+    if argv and argv[0] == "chat":
+        args = parse_args(argv[1:])
+        overrides: dict = {
+            "max_turns": args.max_turns, "max_cost_usd": args.max_cost,
+            "context_budget": args.context_budget,
+            "context_hard_limit": args.context_hard_limit,
+            "context_keep_recent": args.keep_recent,
+            "tool_result_budget_chars": args.tool_result_budget_chars,
+            "reasoning_effort": args.reasoning_effort,
+            "max_completion_tokens": args.max_completion_tokens,
+            "skills": args.skill,
+            "yolo": args.yolo,
+        }
+        if args.model:
+            overrides["model"] = args.model
+        if args.workdir:
+            overrides["workdir"] = Path(args.workdir)
+        if args.runs_dir:
+            overrides["runs_dir"] = Path(args.runs_dir)
+        cfg = Config.from_env(**overrides)
+        if not cfg.api_key:
+            print("缺少 OPENAI_API_KEY：复制 .env.example 为 .env 并填写", file=sys.stderr)
+            return 2
+        provider = OpenAIChatProvider(
+            model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url,
+            max_retries=cfg.max_retries, reasoning_effort=cfg.reasoning_effort,
+            max_completion_tokens=cfg.max_completion_tokens)
+        return run_tui(cfg, provider, resume_run_id=args.resume)
 
     args = parse_args(argv)
     overrides: dict = {
         "max_turns": args.max_turns, "max_cost_usd": args.max_cost,
-        "context_budget": args.context_budget, "context_keep_recent": args.keep_recent,
+        "context_budget": args.context_budget,
+        "context_hard_limit": args.context_hard_limit,
+        "context_keep_recent": args.keep_recent,
+        "tool_result_budget_chars": args.tool_result_budget_chars,
         "reasoning_effort": args.reasoning_effort,
         "max_completion_tokens": args.max_completion_tokens,
         "skills": args.skill, "yolo": args.yolo,

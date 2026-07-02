@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from queue import Empty, Queue
+import time
 
+from .cancel import CancelledError, CancellationToken
 from .config import Config, load_pricing
 from .context import ContextManager, strip_internal_marks
 from .hooks import denial_message, gate_tool_call
@@ -44,6 +48,40 @@ LENGTH_NUDGE = ("Your previous reply was cut off by the output token limit. "
                 "via tools instead of into your reply.")
 
 
+@dataclass(frozen=True)
+class ContinueDecision:
+    """Why the loop is continuing into another model turn."""
+    reason: str
+    detail: dict = field(default_factory=dict)
+
+    def as_event(self, turn: int) -> dict:
+        return {"type": "transition", "turn": turn, "kind": "continue",
+                "reason": self.reason, **self.detail}
+
+
+@dataclass(frozen=True)
+class TerminalState:
+    """Why the loop stopped."""
+    reason: str
+    turns: int
+    final_message: str | None = None
+
+
+@dataclass
+class AgentState:
+    """Mutable loop state carried across turns.
+
+    The loop reads a snapshot at the top of each turn and writes one explicit
+    transition before continuing. This mirrors the Ch02 State/Continue/Terminal
+    model without importing Claude Code's unrelated product machinery.
+    """
+    messages: list[dict]
+    turn: int = 0
+    transition: ContinueDecision | None = None
+    length_recovery_count: int = 0
+    reactive_compact_attempted: bool = False
+
+
 def build_initial_messages(task: str, cfg: Config) -> list[dict]:
     system = SYSTEM_PROMPT.format(workdir=cfg.workdir,
                                   skills=render_skills_section(cfg.skills))
@@ -58,101 +96,252 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
     messages = resume_messages or build_initial_messages(task or "", cfg)
     schemas = openai_tool_schemas()
     ledger = CostLedger(load_pricing())
-    cm = ContextManager(cfg.context_budget, cfg.context_keep_recent)
+    cm = ContextManager(cfg.context_budget, cfg.context_keep_recent,
+                        cfg.context_hard_limit, cfg.tool_result_budget_chars)
     tool_ctx = ToolContext(cfg.workdir, cfg.bash_timeout, cfg.tool_output_limit)
 
-    logger.emit("run_start", task=task, model=cfg.model, workdir=str(cfg.workdir),
-                config={"max_turns": cfg.max_turns, "max_cost_usd": cfg.max_cost_usd,
-                        "context_budget": cfg.context_budget,
-                        "reasoning_effort": cfg.reasoning_effort},
-                sdk_version=_openai_version(), skills=cfg.skills)
+    events = _run_agent_events(task, cfg, provider, schemas, ledger, cm, tool_ctx, messages)
+    terminal: TerminalState | None = None
+    while True:
+        try:
+            event = next(events)
+        except StopIteration as done:
+            terminal = done.value
+            break
+        event = dict(event)
+        type_ = event.pop("type")
+        logger.emit(type_, **event)
 
-    reason, final, turn, nudged = "max_turns", None, 0, False
+    terminal = terminal or TerminalState("error", 0, "loop ended without terminal state")
+    return logger.finish(terminal.reason, terminal.turns, ledger, terminal.final_message)
+
+
+def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
+                      schemas: list[dict], ledger: CostLedger,
+                      cm: ContextManager, tool_ctx: ToolContext,
+                      messages: list[dict], session_id: str | None = None,
+                      cancel_token: CancellationToken | None = None):
+    state = AgentState(messages=messages)
+    yield {
+        "type": "run_start",
+        "task": task,
+        "model": cfg.model,
+        "workdir": str(cfg.workdir),
+        "config": {"max_turns": cfg.max_turns, "max_cost_usd": cfg.max_cost_usd,
+                   "context_budget": cfg.context_budget,
+                   "reasoning_effort": cfg.reasoning_effort},
+        "sdk_version": _openai_version(),
+        "skills": cfg.skills,
+        "session_id": session_id,
+    }
+
     try:
-        for turn in range(1, cfg.max_turns + 1):
+        while state.turn < cfg.max_turns:
+            if cancel_token:
+                cancel_token.throw_if_cancelled()
             if ledger.cost_usd >= cfg.max_cost_usd:
-                reason = "max_cost"
-                break
+                return TerminalState("max_cost", state.turn)
 
-            edit = cm.maybe_compact(messages)
-            if edit:
-                logger.emit("context_edit", turn=turn,
-                            prompt_tokens_before=cm.last_prompt_tokens, **edit)
+            state.turn += 1
+            yield {"type": "turn_start", "turn": state.turn,
+                   "transition": state.transition.reason if state.transition else None,
+                   "n_messages": len(state.messages)}
 
-            wire = strip_internal_marks(messages)
-            logger.emit("llm_request", turn=turn, model=cfg.model, n_messages=len(wire),
-                        messages=wire, tools=[s["function"]["name"] for s in schemas],
-                        params={"reasoning_effort": cfg.reasoning_effort,
-                                "max_completion_tokens": cfg.max_completion_tokens})
+            for edit in (cm.budget_tool_results(state.messages),
+                         cm.maybe_compact(state.messages)):
+                if edit:
+                    yield {"type": "context_edit", "turn": state.turn,
+                           "prompt_tokens_before": cm.last_prompt_tokens, **edit}
 
-            resp = provider.complete(
-                wire, schemas,
-                on_retry=lambda attempt, status, err, sleep_s: logger.emit(
-                    "retry", turn=turn, attempt=attempt, status=status,
-                    error=err[:500], sleep_s=sleep_s))
+            hard = cm.hard_limit_exceeded(state.messages)
+            if hard:
+                yield {"type": "error", "where": "context", "error": "blocking_limit",
+                       **hard}
+                return TerminalState("blocking_limit", state.turn,
+                                     f"Prompt estimate {hard['prompt_tokens_estimate']} "
+                                     f"exceeds hard limit {hard['hard_limit_tokens']}.")
+
+            wire = strip_internal_marks(state.messages)
+            yield {"type": "llm_request", "turn": state.turn, "model": cfg.model,
+                   "n_messages": len(wire), "messages": wire,
+                   "tools": [s["function"]["name"] for s in schemas],
+                              "params": {"reasoning_effort": cfg.reasoning_effort,
+                              "max_completion_tokens": cfg.max_completion_tokens}}
+
+            retry_events: list[dict] = []
+            yield {"type": "stream_request_start", "turn": state.turn,
+                   "model": cfg.model}
+            try:
+                stream = provider.stream(
+                    wire, schemas,
+                    on_retry=lambda attempt, status, err, sleep_s: retry_events.append(
+                        {"type": "retry", "turn": state.turn, "attempt": attempt,
+                         "status": status, "error": err[:500], "sleep_s": sleep_s}),
+                    cancel_token=cancel_token)
+                while True:
+                    try:
+                        event = next(stream)
+                    except StopIteration as done:
+                        resp: ModelTurn = done.value
+                        break
+                    for retry_event in retry_events:
+                        yield retry_event
+                    retry_events.clear()
+                    if event.get("type") == "assistant_delta":
+                        yield {"turn": state.turn, **event}
+                    else:
+                        yield {"type": "provider_event", "turn": state.turn, **event}
+                for retry_event in retry_events:
+                    yield retry_event
+            except CancelledError:
+                return TerminalState("aborted_streaming", state.turn)
+            except KeyboardInterrupt:
+                if cancel_token:
+                    cancel_token.cancel()
+                return TerminalState("aborted_streaming", state.turn)
+            except Exception as e:
+                if _is_prompt_too_long_error(e):
+                    edit = None if state.reactive_compact_attempted else cm.reactive_compact(state.messages)
+                    if edit:
+                        state.reactive_compact_attempted = True
+                        yield {"type": "context_edit", "turn": state.turn,
+                               "prompt_tokens_before": cm.last_prompt_tokens, **edit}
+                        state.transition = ContinueDecision(
+                            "reactive_compact_retry", {"error": str(e)[:500]})
+                        yield state.transition.as_event(state.turn)
+                        continue
+                    return TerminalState("prompt_too_long", state.turn, str(e)[:1000])
+                raise
 
             cost = ledger.record(cfg.model, resp.usage)
             cm.observe(resp.usage.prompt_tokens)
-            logger.emit("llm_response", turn=turn, finish_reason=resp.finish_reason,
-                        content=resp.content,
-                        tool_calls=[{"id": tc.id, "name": tc.name, "arguments": tc.arguments_raw}
-                                    for tc in resp.tool_calls] or None,
-                        usage=resp.usage.as_dict(), cost_usd=round(cost, 6),
-                        request_id=resp.request_id, latency_ms=resp.latency_ms,
-                        reasoning_content=resp.reasoning_content)
+            yield {"type": "llm_response", "turn": state.turn,
+                   "finish_reason": resp.finish_reason, "content": resp.content,
+                   "tool_calls": [{"id": tc.id, "name": tc.name,
+                                   "arguments": tc.arguments_raw}
+                                  for tc in resp.tool_calls] or None,
+                   "usage": resp.usage.as_dict(), "cost_usd": round(cost, 6),
+                   "request_id": resp.request_id, "latency_ms": resp.latency_ms,
+                   "reasoning_content": resp.reasoning_content}
 
-            messages.append(resp.to_assistant_message())
+            state.messages.append(resp.to_assistant_message())
 
             if resp.tool_calls:
-                messages.extend(_run_tool_calls(resp.tool_calls, tool_ctx, cfg, logger, turn))
+                tool_messages = []
+                try:
+                    for event in _run_tool_call_events(resp.tool_calls, tool_ctx, cfg,
+                                                       state.turn, cancel_token):
+                        if event["type"] == "tool_result_message":
+                            tool_messages.append(event["message"])
+                            continue
+                        yield event
+                except CancelledError:
+                    return TerminalState("aborted_tools", state.turn)
+                state.messages.extend(tool_messages)
+                if state.turn >= cfg.max_turns:
+                    return TerminalState("max_turns", state.turn)
+                state.transition = ContinueDecision(
+                    "next_turn", {"tool_calls": len(resp.tool_calls)})
+                yield state.transition.as_event(state.turn)
                 continue
+
             if resp.finish_reason == "length":
-                if not nudged:
-                    nudged = True
-                    messages.append({"role": "user", "content": LENGTH_NUDGE})
+                if state.length_recovery_count < 1:
+                    state.length_recovery_count += 1
+                    state.messages.append({"role": "user", "content": LENGTH_NUDGE})
+                    state.transition = ContinueDecision(
+                        "output_recovery", {"attempt": state.length_recovery_count})
+                    yield state.transition.as_event(state.turn)
                     continue
-                reason, final = "truncated", resp.content
-                break
-            reason, final = "completed", resp.content
-            break
+                return TerminalState("truncated", state.turn, resp.content)
+
+            return TerminalState("completed", state.turn, resp.content)
+        return TerminalState("max_turns", state.turn)
     except KeyboardInterrupt:
-        reason = "interrupted"
+        return TerminalState("interrupted", state.turn)
+    except CancelledError:
+        return TerminalState("interrupted", state.turn)
     except Exception as e:
-        reason, final = "error", f"{type(e).__name__}: {e}"
-        logger.emit("error", where="loop", error=final, traceback=traceback.format_exc())
+        final = f"{type(e).__name__}: {e}"
+        yield {"type": "error", "where": "loop", "error": final,
+               "traceback": traceback.format_exc()}
+        return TerminalState("model_error", state.turn, final)
 
-    return logger.finish(reason, turn, ledger, final)
 
-
-def _run_tool_calls(tool_calls: list[ToolCallRequest], tool_ctx: ToolContext,
-                    cfg: Config, logger: RunLogger, turn: int) -> list[dict]:
-    """执行一轮的全部工具调用，为每个 tool_call_id 生成应答消息（顺序保持）。"""
+def _run_tool_call_events(tool_calls: list[ToolCallRequest], tool_ctx: ToolContext,
+                          cfg: Config, turn: int,
+                          cancel_token: CancellationToken | None = None):
+    """Execute tool calls while yielding live lifecycle/progress events."""
     for tc in tool_calls:
-        logger.emit("tool_call", turn=turn, tool_call_id=tc.id, name=tc.name,
-                    arguments=tc.arguments if tc.arguments is not None else tc.arguments_raw)
+        arguments = tc.arguments if tc.arguments is not None else tc.arguments_raw
+        yield {"type": "tool_call", "turn": turn, "tool_call_id": tc.id,
+               "name": tc.name, "arguments": arguments}
+        yield {"type": "tool_start", "turn": turn, "tool_call_id": tc.id,
+               "name": tc.name, "arguments": arguments}
 
-    def run_one(tc: ToolCallRequest) -> ToolResult:
         if tc.parse_error:   # 模型吐了非法 JSON：本身就是要回传的错误
-            return ToolResult(f"ERROR: {tc.parse_error}. Re-send the tool call with "
-                              f"valid JSON arguments. Raw arguments were: {tc.arguments_raw[:300]}",
-                              ok=False)
+            result = ToolResult(
+                f"ERROR: {tc.parse_error}. Re-send the tool call with valid JSON "
+                f"arguments. Raw arguments were: {tc.arguments_raw[:300]}",
+                ok=False)
+            yield from _finish_tool_event(turn, tc, result)
+            continue
+
         allowed, why = gate_tool_call(tc.name, tc.arguments, cfg)
         if not allowed:
-            return ToolResult(denial_message(tc.name, why), ok=False)
-        return execute_tool(tc.name, tc.arguments, tool_ctx)
+            result = ToolResult(denial_message(tc.name, why), ok=False)
+            yield from _finish_tool_event(turn, tc, result)
+            continue
 
-    if len(tool_calls) > 1:  # 模型并行发起的调用就真并行执行
-        with ThreadPoolExecutor(max_workers=min(len(tool_calls), 8)) as pool:
-            results = list(pool.map(run_one, tool_calls))
-    else:
-        results = [run_one(tool_calls[0])]
+        progress_events: Queue[dict] = Queue()
 
-    out = []
-    for tc, r in zip(tool_calls, results):
-        logger.emit("tool_result", turn=turn, tool_call_id=tc.id, name=tc.name,
-                    ok=r.ok, result=r.text, duration_ms=r.duration_ms, truncated=r.truncated)
-        out.append(tool_message(tc.id, r.ok, r.text))
-    return out
+        def on_progress(payload: dict) -> None:
+            progress_events.put({"type": "tool_progress", "turn": turn,
+                                 "tool_call_id": tc.id, "name": tc.name,
+                                 **payload})
+
+        child_ctx = ToolContext(
+            tool_ctx.workdir, tool_ctx.bash_timeout, tool_ctx.output_limit,
+            cancel_token=cancel_token, progress_callback=on_progress)
+
+        def run_one() -> ToolResult:
+            if cancel_token:
+                cancel_token.throw_if_cancelled()
+            return execute_tool(tc.name, tc.arguments or {}, child_ctx)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(run_one)
+            try:
+                while not future.done():
+                    if cancel_token and cancel_token.is_cancelled:
+                        raise CancelledError("tool execution cancelled")
+                    yield from _drain_progress(progress_events)
+                    time.sleep(0.05)
+                yield from _drain_progress(progress_events)
+                result = future.result()
+            except KeyboardInterrupt:
+                if cancel_token:
+                    cancel_token.cancel()
+                raise CancelledError("tool execution interrupted")
+        yield from _finish_tool_event(turn, tc, result)
+
+
+def _drain_progress(progress_events: Queue[dict]):
+    while True:
+        try:
+            yield progress_events.get_nowait()
+        except Empty:
+            return
+
+
+def _finish_tool_event(turn: int, tc: ToolCallRequest, r: ToolResult):
+    yield {"type": "tool_result", "turn": turn, "tool_call_id": tc.id,
+           "name": tc.name, "ok": r.ok, "result": r.text,
+           "duration_ms": r.duration_ms, "truncated": r.truncated}
+    yield {"type": "tool_end", "turn": turn, "tool_call_id": tc.id,
+           "name": tc.name, "ok": r.ok, "duration_ms": r.duration_ms,
+           "truncated": r.truncated}
+    yield {"type": "tool_result_message", "message": tool_message(tc.id, r.ok, r.text)}
 
 
 def tool_message(tool_call_id: str, ok: bool, text: str) -> dict:
@@ -179,6 +368,14 @@ def build_resume_messages(events: list[dict]) -> list[dict]:
         elif e["type"] == "tool_result":
             messages.append(tool_message(e["tool_call_id"], e.get("ok", True), e["result"]))
     return messages
+
+
+def _is_prompt_too_long_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    hints = ("context length", "maximum context", "prompt too long",
+             "too many tokens", "tokens exceeds", "context_length_exceeded")
+    return status in (400, 413, 422) and any(h in text for h in hints)
 
 
 def _openai_version() -> str:

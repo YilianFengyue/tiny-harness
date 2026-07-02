@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections.abc import Iterator
 from typing import Callable
 
+from ..cancel import CancellationToken
 from ..telemetry import Usage
 
 # on_retry(attempt, status, error, sleep_s) —— provider 在每次退避前回调，由 loop 写 telemetry
@@ -80,3 +82,21 @@ class Provider(ABC):
 
         抛出异常即为不可恢复错误（4xx 非限流 / 重试耗尽），由 loop 终止运行。
         """
+
+    def stream(self, messages: list[dict], tools: list[dict],
+               on_retry: RetryCallback | None = None,
+               cancel_token: CancellationToken | None = None) -> Iterator[dict]:
+        """Yield provider-neutral stream events and return the final ModelTurn.
+
+        Existing tests/providers only need `complete()`. Real providers can
+        override this to surface token deltas while preserving the same final
+        ModelTurn contract used by the loop.
+        """
+        if cancel_token:
+            cancel_token.throw_if_cancelled()
+        turn = self.complete(messages, tools, on_retry=on_retry)
+        if cancel_token:
+            cancel_token.throw_if_cancelled()
+        if turn.content:
+            yield {"type": "assistant_delta", "content": turn.content}
+        return turn

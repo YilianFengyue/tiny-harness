@@ -138,12 +138,61 @@ def test_trajectory_is_complete_and_ordered(make_cfg, make_logger):
     run(cfg, logger, provider)
     events = read_trajectory(runs_dir, run_id)
     types = [e["type"] for e in events]
-    assert types == ["run_start", "llm_request", "llm_response", "tool_call",
-                     "tool_result", "llm_request", "llm_response", "run_end"]
+    assert types == ["run_start",
+                     "turn_start", "llm_request", "stream_request_start",
+                     "llm_response", "tool_call", "tool_start",
+                     "tool_progress", "tool_result", "tool_end", "transition",
+                     "turn_start", "llm_request", "stream_request_start",
+                     "assistant_delta", "llm_response", "run_end"]
     assert all(e["run_id"] == run_id for e in events)
     assert [e["step"] for e in events] == list(range(len(events)))
+    transitions = [e for e in events if e["type"] == "transition"]
+    assert transitions == [{
+        **{k: transitions[0][k] for k in ("run_id", "step", "ts", "type")},
+        "turn": 1,
+        "kind": "continue",
+        "reason": "next_turn",
+        "tool_calls": 1,
+    }]
+    turn_starts = [e for e in events if e["type"] == "turn_start"]
+    assert [e["transition"] for e in turn_starts] == [None, "next_turn"]
+    assert [e["name"] for e in events if e["type"] == "tool_start"] == ["calculator"]
+    assert [e["name"] for e in events if e["type"] == "tool_end"] == ["calculator"]
+    assert [e["content"] for e in events if e["type"] == "assistant_delta"] == ["answer is 42"]
     end = events[-1]
     assert end["reason"] == "completed" and end["usage_total"]["prompt_tokens"] == 200
+
+
+def test_length_recovery_is_explicit_transition(make_cfg, make_logger):
+    cfg, logger = make_cfg(), make_logger()
+    provider = MockProvider([
+        turn(content="partial...", finish="length"),
+        turn(content="full answer"),
+    ])
+    s = run(cfg, logger, provider)
+    assert s["reason"] == "completed"
+    events = read_trajectory(cfg.runs_dir, logger.run_id)
+    transitions = [e for e in events if e["type"] == "transition"]
+    assert [(e["reason"], e.get("attempt")) for e in transitions] == [("output_recovery", 1)]
+    turn_starts = [e for e in events if e["type"] == "turn_start"]
+    assert [e["transition"] for e in turn_starts] == [None, "output_recovery"]
+    assert provider.requests[1][-1]["role"] == "user"
+    assert "cut off" in provider.requests[1][-1]["content"]
+
+
+def test_second_length_terminal_is_truncated_without_fake_completion(make_cfg, make_logger):
+    cfg, logger = make_cfg(), make_logger()
+    provider = MockProvider([
+        turn(content="partial...", finish="length"),
+        turn(content="still partial", finish="length"),
+    ])
+    s = run(cfg, logger, provider)
+    assert s["reason"] == "truncated"
+    events = read_trajectory(cfg.runs_dir, logger.run_id)
+    assert [e["reason"] for e in events if e["type"] == "transition"] == ["output_recovery"]
+    assert events[-1]["type"] == "run_end"
+    assert events[-1]["reason"] == "truncated"
+    assert events[-1]["final_message"] == "still partial"
 
 
 def test_resume_rebuilds_exact_message_state(make_cfg, make_logger):

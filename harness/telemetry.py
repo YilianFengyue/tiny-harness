@@ -9,12 +9,19 @@
 
 事件类型（viewer/index.html 与 tests/ 共同依赖的契约，改动需同步三处）：
   run_start     {task, model, workdir, config, sdk_version, skills}
+  turn_start    {turn, transition, n_messages}
   llm_request   {turn, model, n_messages, messages, tools, params}
+  stream_request_start {turn, model}
+  assistant_delta {turn, content?, reasoning_content?}
   retry         {turn, attempt, status, error, sleep_s}
   llm_response  {turn, finish_reason, content, tool_calls, usage, cost_usd,
                  request_id, latency_ms}
   tool_call     {turn, tool_call_id, name, arguments}
+  tool_start    {turn, tool_call_id, name, arguments}
+  tool_progress {turn, tool_call_id, name, ...progress}
   tool_result   {turn, tool_call_id, name, ok, result, duration_ms, truncated}
+  tool_end      {turn, tool_call_id, name, ok, duration_ms, truncated}
+  transition    {turn, kind, reason, ...details}
   context_edit  {turn, cleared_messages, est_tokens_freed, prompt_tokens_before}
   error         {where, error}
   run_end       {reason, turns, usage_total, cost_usd, pricing_unknown,

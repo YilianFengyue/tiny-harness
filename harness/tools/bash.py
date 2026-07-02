@@ -16,6 +16,8 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 from .registry import ToolContext, ToolError, tool
 
@@ -40,8 +42,21 @@ def check_dangerous(arguments: dict) -> str | None:
     return None
 
 
-def _bash_executable() -> str | None:
-    return shutil.which("bash")
+def _shell_argv(command: str) -> tuple[list[str] | str, bool]:
+    bash_exe = shutil.which("bash")
+    if sys.platform == "win32":
+        # Windows 自带 C:\Windows\System32\bash.exe 只是 WSL launcher；未安装
+        # distro 时会打印乱码并退出。Git Bash 才是这里想要的可用 bash。
+        if bash_exe and "windows\\system32" not in bash_exe.lower():
+            return [bash_exe, "-lc", command], False
+        ps = shutil.which("pwsh") or shutil.which("powershell")
+        if ps:
+            return [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                    "Bypass", "-Command", command], False
+        return command, True
+    if bash_exe:
+        return [bash_exe, "-c", command], False
+    return command, True
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
@@ -80,12 +95,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
 def bash(ctx: ToolContext, command: str) -> str:
     if not command.strip():
         raise ToolError("empty command")
-    bash_exe = _bash_executable()
-    if bash_exe:
-        argv: list[str] | str = [bash_exe, "-c", command]
-        use_shell = False
-    else:  # 无 bash 的 Windows 环境退化为 cmd；工具行为差异写进返回值提醒模型
-        argv, use_shell = command, True
+    argv, use_shell = _shell_argv(command)
 
     popen_kwargs: dict = dict(
         cwd=str(ctx.workdir), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -94,17 +104,57 @@ def bash(ctx: ToolContext, command: str) -> str:
     if sys.platform != "win32":
         popen_kwargs["start_new_session"] = True  # 自成进程组，超时可整组击杀
 
+    ctx.throw_if_cancelled()
     proc = subprocess.Popen(argv, **popen_kwargs)
+    stdout_buf = bytearray()
+    stderr_buf = bytearray()
+
+    def drain(pipe, buf: bytearray) -> None:
+        try:
+            for chunk in iter(lambda: pipe.read(4096), b""):
+                if chunk:
+                    buf.extend(chunk)
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    stdout_thread = threading.Thread(target=drain, args=(proc.stdout, stdout_buf),
+                                     daemon=True)
+    stderr_thread = threading.Thread(target=drain, args=(proc.stderr, stderr_buf),
+                                     daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    t0 = time.monotonic()
+    next_progress = t0 + 1.0
     try:
-        stdout_b, stderr_b = proc.communicate(timeout=ctx.bash_timeout)
-    except subprocess.TimeoutExpired:
-        _kill_tree(proc)
-        stdout_b, stderr_b = proc.communicate()
-        raise ToolError(
-            f"command killed after {ctx.bash_timeout}s timeout. "
-            f"Partial stdout: {stdout_b.decode('utf-8', 'replace')[:500]!r}. "
-            "Avoid interactive/long-running commands; for big data prefer "
-            "streaming tools (awk, head) or write intermediate results to files.")
+        while proc.poll() is None:
+            ctx.throw_if_cancelled()
+            now = time.monotonic()
+            if now - t0 > ctx.bash_timeout:
+                _kill_tree(proc)
+                stdout_thread.join(timeout=1)
+                stderr_thread.join(timeout=1)
+                stdout_b, stderr_b = bytes(stdout_buf), bytes(stderr_buf)
+                raise ToolError(
+                    f"command killed after {ctx.bash_timeout}s timeout. "
+                    f"Partial stdout: {stdout_b.decode('utf-8', 'replace')[:500]!r}. "
+                    "Avoid interactive/long-running commands; for big data prefer "
+                    "streaming tools (awk, head) or write intermediate results to files.")
+            if now >= next_progress:
+                ctx.progress(phase="running", elapsed_s=round(now - t0, 1),
+                             stdout_chars=len(stdout_buf),
+                             stderr_chars=len(stderr_buf))
+                next_progress = now + 1.0
+            time.sleep(0.05)
+    except Exception:
+        if proc.poll() is None:
+            _kill_tree(proc)
+        raise
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    stdout_b, stderr_b = bytes(stdout_buf), bytes(stderr_buf)
 
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace")

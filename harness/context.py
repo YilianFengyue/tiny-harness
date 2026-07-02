@@ -22,6 +22,8 @@ PLACEHOLDER = "[tool result cleared to save context: ~{est} tokens. Re-run the t
 class ContextManager:
     budget_tokens: int = 240_000
     keep_recent: int = 3          # 保留最近 N 条工具结果不清理
+    hard_limit_tokens: int = 300_000
+    tool_result_budget_chars: int = 16_000
     last_prompt_tokens: int = 0   # 上一轮真实 input 规模（由 loop 在每次响应后更新）
 
     def observe(self, prompt_tokens: int) -> None:
@@ -31,17 +33,62 @@ class ContextManager:
         """超预算时就地清理旧 tool 消息，返回清理统计（无动作返回 None）。"""
         if self.last_prompt_tokens < self.budget_tokens:
             return None
+        return self.clear_old_tool_results(messages, reason="over_budget")
+
+    def budget_tool_results(self, messages: list[dict]) -> dict | None:
+        """Before each request, shrink individual oversized tool results."""
+        changed, freed_chars = 0, 0
+        for m in messages:
+            if m.get("role") != "tool" or m.get("_budgeted"):
+                continue
+            content = m.get("content") or ""
+            if len(content) <= self.tool_result_budget_chars:
+                continue
+            head = content[: int(self.tool_result_budget_chars * 0.7)]
+            tail = content[-int(self.tool_result_budget_chars * 0.15):]
+            omitted = len(content) - len(head) - len(tail)
+            m["content"] = (
+                f"{head}\n... [tool result budgeted before model request: "
+                f"{omitted} chars omitted; re-run the tool with a narrower "
+                f"request if exact omitted content is needed] ...\n{tail}"
+            )
+            m["_budgeted"] = True
+            changed += 1
+            freed_chars += omitted
+        if not changed:
+            return None
+        return {"kind": "tool_result_budget", "budgeted_messages": changed,
+                "est_tokens_freed": freed_chars // 4}
+
+    def hard_limit_exceeded(self, messages: list[dict]) -> dict | None:
+        """Return stats when the next request is likely over the hard limit."""
+        estimate = max(self.last_prompt_tokens, estimate_tokens(messages))
+        if estimate < self.hard_limit_tokens:
+            return None
+        return {"prompt_tokens_estimate": estimate,
+                "hard_limit_tokens": self.hard_limit_tokens}
+
+    def reactive_compact(self, messages: list[dict]) -> dict | None:
+        """Emergency compaction after a provider says the prompt is too long."""
+        return self.clear_old_tool_results(messages, reason="reactive_compact",
+                                           keep_recent=0, min_chars=1)
+
+    def clear_old_tool_results(self, messages: list[dict], reason: str,
+                               keep_recent: int | None = None,
+                               min_chars: int = 200) -> dict | None:
+        """Replace older tool contents with placeholders while preserving IDs."""
+        keep = self.keep_recent if keep_recent is None else keep_recent
 
         tool_indices = [i for i, m in enumerate(messages)
                         if m.get("role") == "tool" and not m.get("_cleared")]
-        clearable = tool_indices[:-self.keep_recent] if self.keep_recent else tool_indices
+        clearable = tool_indices[:-keep] if keep else tool_indices
         if not clearable:
             return None
 
         cleared, freed_chars = 0, 0
         for i in clearable:
             content = messages[i].get("content") or ""
-            if len(content) < 200:    # 太短的清了也省不出什么，还破坏可读性
+            if len(content) < min_chars:    # 太短的清了也省不出什么，还破坏可读性
                 continue
             est = max(len(content) // 4, 1)   # chars/4 粗估，只用于占位符提示
             messages[i]["content"] = PLACEHOLDER.format(est=est)
@@ -54,9 +101,23 @@ class ContextManager:
         # 乐观下调水位，避免下一轮重复触发；真实值由下一次 API 响应矫正
         est_freed = freed_chars // 4
         self.last_prompt_tokens = max(self.last_prompt_tokens - est_freed, 0)
-        return {"cleared_messages": cleared, "est_tokens_freed": est_freed}
+        return {"kind": reason, "cleared_messages": cleared,
+                "est_tokens_freed": est_freed}
 
 
 def strip_internal_marks(messages: list[dict]) -> list[dict]:
     """发送给 API 前剥除内部标记字段（协议不认识多余字段）。"""
     return [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
+
+
+def estimate_tokens(messages: list[dict]) -> int:
+    """Coarse prompt estimate for local hard-limit checks."""
+    total = 0
+    for m in messages:
+        total += 4
+        for value in m.values():
+            if isinstance(value, str):
+                total += max(len(value) // 4, 1)
+            elif isinstance(value, list):
+                total += len(str(value)) // 4
+    return total

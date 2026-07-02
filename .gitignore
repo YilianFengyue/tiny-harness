@@ -5,3 +5,4 @@ runs/
 eval/results/
 .pytest_cache/
 *.egg-info/
+CodeReference/

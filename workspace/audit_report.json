@@ -1,0 +1,11 @@
+{
+  "valid_score_definition": "numeric score between 0 and 100 inclusive",
+  "total_rows": 800,
+  "valid_score_count": 640,
+  "invalid_or_out_of_range_score_count": 160,
+  "count": 640,
+  "mean": 50.641546875,
+  "min": 0.0,
+  "max": 100.0,
+  "sum_for_verification": 32410.59
+}

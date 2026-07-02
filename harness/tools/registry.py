@@ -16,6 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..cancel import CancellationToken, CancelledError
+
+ProgressCallback = Callable[[dict], None]
+
 
 @dataclass
 class ToolContext:
@@ -23,6 +27,16 @@ class ToolContext:
     workdir: Path
     bash_timeout: int = 60
     output_limit: int = 20_000
+    cancel_token: CancellationToken | None = None
+    progress_callback: ProgressCallback | None = None
+
+    def throw_if_cancelled(self) -> None:
+        if self.cancel_token:
+            self.cancel_token.throw_if_cancelled()
+
+    def progress(self, **payload) -> None:
+        if self.progress_callback:
+            self.progress_callback(payload)
 
 
 @dataclass
@@ -84,17 +98,24 @@ def openai_tool_schemas() -> list[dict]:
 def execute_tool(name: str, arguments: dict, ctx: ToolContext) -> ToolResult:
     """统一执行入口：计时、捕获、截断。不存在的工具名也走可恢复错误路径。"""
     t0 = time.monotonic()
+    ctx.throw_if_cancelled()
     spec = REGISTRY.get(name)
     if spec is None:
         return ToolResult(
             f"Unknown tool '{name}'. Available tools: {', '.join(REGISTRY)}.",
             ok=False, duration_ms=_ms(t0))
     try:
+        ctx.progress(phase="started")
         text = spec.fn(ctx, **arguments)
+        ctx.throw_if_cancelled()
         text, truncated = _truncate(text, ctx.output_limit)
+        if truncated:
+            ctx.progress(phase="truncated")
         return ToolResult(text, ok=True, truncated=truncated, duration_ms=_ms(t0))
     except ToolError as e:
         return ToolResult(str(e), ok=False, duration_ms=_ms(t0))
+    except CancelledError:
+        raise
     except TypeError as e:
         # strict 模式下基本不会发生；防御中转网关不支持 strict 的情况
         return ToolResult(f"Invalid arguments for '{name}': {e}", ok=False, duration_ms=_ms(t0))
