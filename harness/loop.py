@@ -27,7 +27,13 @@ from .providers.base import ModelTurn, Provider, ToolCallRequest
 from .skills import render_skills_section
 from .telemetry import CostLedger, RunLogger
 from .tools import ToolContext, execute_tool, openai_tool_schemas
-from .tools.registry import ToolResult
+from .tools.registry import (
+    ToolResult,
+    available_tool_names,
+    find_tool_spec,
+    tool_property,
+    validate_tool_input,
+)
 
 SYSTEM_PROMPT = """You are a precise, autonomous agent working in a sandboxed workspace.
 
@@ -272,58 +278,140 @@ def _run_tool_call_events(tool_calls: list[ToolCallRequest], tool_ctx: ToolConte
                           cfg: Config, turn: int,
                           cancel_token: CancellationToken | None = None):
     """Execute tool calls while yielding live lifecycle/progress events."""
+    for batch in _partition_tool_calls(tool_calls):
+        yield from _run_tool_batch_events(batch, tool_ctx, cfg, turn, cancel_token)
+
+
+def _partition_tool_calls(tool_calls: list[ToolCallRequest]) -> list[list[ToolCallRequest]]:
+    batches: list[list[ToolCallRequest]] = []
+    batch_safe = False
     for tc in tool_calls:
-        arguments = tc.arguments if tc.arguments is not None else tc.arguments_raw
-        yield {"type": "tool_call", "turn": turn, "tool_call_id": tc.id,
-               "name": tc.name, "arguments": arguments}
-        yield {"type": "tool_start", "turn": turn, "tool_call_id": tc.id,
-               "name": tc.name, "arguments": arguments}
+        spec = find_tool_spec(tc.name)
+        safe = (
+            tc.parse_error is None
+            and tc.arguments is not None
+            and tool_property(spec, "concurrency_safe", tc.arguments)
+        )
+        if safe and batches and batch_safe:
+            batches[-1].append(tc)
+        else:
+            batches.append([tc])
+            batch_safe = safe
+    return batches
 
-        if tc.parse_error:   # 模型吐了非法 JSON：本身就是要回传的错误
-            result = ToolResult(
-                f"ERROR: {tc.parse_error}. Re-send the tool call with valid JSON "
-                f"arguments. Raw arguments were: {tc.arguments_raw[:300]}",
-                ok=False)
-            yield from _finish_tool_event(turn, tc, result)
-            continue
 
-        allowed, why = gate_tool_call(tc.name, tc.arguments, cfg)
-        if not allowed:
-            result = ToolResult(denial_message(tc.name, why), ok=False)
-            yield from _finish_tool_event(turn, tc, result)
-            continue
+def _run_tool_batch_events(batch: list[ToolCallRequest], tool_ctx: ToolContext,
+                           cfg: Config, turn: int,
+                           cancel_token: CancellationToken | None = None):
+    progress_events: Queue[dict] = Queue()
+    prepared: list[tuple[ToolCallRequest, ToolResult | None]] = []
 
-        progress_events: Queue[dict] = Queue()
+    for tc in batch:
+        for event in _preflight_tool_events(tc, tool_ctx, cfg, turn):
+            if event["type"] == "tool_preflight_result":
+                prepared.append((tc, event["result"]))
+                break
+            yield event
+        else:
+            prepared.append((tc, None))
 
-        def on_progress(payload: dict) -> None:
-            progress_events.put({"type": "tool_progress", "turn": turn,
-                                 "tool_call_id": tc.id, "name": tc.name,
-                                 **payload})
+    runnable = [(tc, result) for tc, result in prepared if result is None]
+    finished: dict[str, ToolResult] = {
+        tc.id: result for tc, result in prepared if result is not None
+    }
 
-        child_ctx = ToolContext(
-            tool_ctx.workdir, tool_ctx.bash_timeout, tool_ctx.output_limit,
-            cancel_token=cancel_token, progress_callback=on_progress)
+    if runnable:
+        workers = min(len(runnable), 8)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_by_id = {}
+            for tc, _ in runnable:
+                def on_progress(payload: dict, tc=tc) -> None:
+                    progress_events.put({"type": "tool_progress", "turn": turn,
+                                         "tool_call_id": tc.id, "name": tc.name,
+                                         **payload})
 
-        def run_one() -> ToolResult:
-            if cancel_token:
-                cancel_token.throw_if_cancelled()
-            return execute_tool(tc.name, tc.arguments or {}, child_ctx)
+                child_ctx = ToolContext(
+                    tool_ctx.workdir, tool_ctx.bash_timeout, tool_ctx.output_limit,
+                    cancel_token=cancel_token, progress_callback=on_progress,
+                    runtime=tool_ctx.runtime)
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(run_one)
+                def run_one(tc=tc, child_ctx=child_ctx) -> ToolResult:
+                    if cancel_token:
+                        cancel_token.throw_if_cancelled()
+                    return execute_tool(tc.name, tc.arguments or {}, child_ctx)
+
+                yield {"type": "tool_start", "turn": turn, "tool_call_id": tc.id,
+                       "name": tc.name, "arguments": tc.arguments}
+                future_by_id[tc.id] = pool.submit(run_one)
+
             try:
-                while not future.done():
+                while any(not f.done() for f in future_by_id.values()):
                     if cancel_token and cancel_token.is_cancelled:
                         raise CancelledError("tool execution cancelled")
                     yield from _drain_progress(progress_events)
                     time.sleep(0.05)
                 yield from _drain_progress(progress_events)
-                result = future.result()
+                for tc, _ in runnable:
+                    finished[tc.id] = future_by_id[tc.id].result()
             except KeyboardInterrupt:
                 if cancel_token:
                     cancel_token.cancel()
                 raise CancelledError("tool execution interrupted")
-        yield from _finish_tool_event(turn, tc, result)
+
+    for tc, _ in prepared:
+        yield from _finish_tool_event(turn, tc, finished[tc.id], tool_ctx)
+
+
+def _preflight_tool_events(tc: ToolCallRequest, tool_ctx: ToolContext,
+                           cfg: Config, turn: int):
+    arguments = tc.arguments if tc.arguments is not None else tc.arguments_raw
+    yield {"type": "tool_call", "turn": turn, "tool_call_id": tc.id,
+           "name": tc.name, "arguments": arguments}
+    yield {"type": "tool_queued", "turn": turn, "tool_call_id": tc.id,
+           "name": tc.name, "arguments": arguments}
+
+    if tc.parse_error:
+        yield {"type": "tool_validate", "turn": turn, "tool_call_id": tc.id,
+               "name": tc.name, "ok": False, "error": tc.parse_error}
+        result = ToolResult(
+            f"ERROR: {tc.parse_error}. Re-send the tool call with valid JSON "
+            f"arguments. Raw arguments were: {tc.arguments_raw[:300]}",
+            ok=False, error_kind="invalid_json")
+        yield {"type": "tool_preflight_result", "result": result}
+        return
+
+    spec = find_tool_spec(tc.name)
+    if spec is None:
+        yield {"type": "tool_validate", "turn": turn, "tool_call_id": tc.id,
+               "name": tc.name, "ok": False, "error": "unknown_tool"}
+        result = ToolResult(
+            f"Unknown tool '{tc.name}'. Available tools: {available_tool_names()}.",
+            ok=False, error_kind="unknown_tool")
+        yield {"type": "tool_preflight_result", "result": result}
+        return
+
+    try:
+        validate_tool_input(spec.name, tc.arguments or {}, tool_ctx)
+    except Exception as e:
+        yield {"type": "tool_validate", "turn": turn, "tool_call_id": tc.id,
+               "name": spec.name, "ok": False, "error": str(e)}
+        yield {"type": "tool_preflight_result",
+               "result": ToolResult(str(e), ok=False, error_kind="validation")}
+        return
+
+    yield {"type": "tool_validate", "turn": turn, "tool_call_id": tc.id,
+           "name": spec.name, "ok": True,
+           "read_only": tool_property(spec, "read_only", tc.arguments or {}),
+           "concurrency_safe": tool_property(spec, "concurrency_safe", tc.arguments or {}),
+           "destructive": tool_property(spec, "destructive", tc.arguments or {})}
+
+    allowed, why = gate_tool_call(spec.name, tc.arguments, cfg)
+    yield {"type": "tool_permission", "turn": turn, "tool_call_id": tc.id,
+           "name": spec.name, "ok": allowed, "reason": why}
+    if not allowed:
+        yield {"type": "tool_preflight_result",
+               "result": ToolResult(denial_message(spec.name, why), ok=False,
+                                    error_kind="permission_denied")}
 
 
 def _drain_progress(progress_events: Queue[dict]):
@@ -334,13 +422,24 @@ def _drain_progress(progress_events: Queue[dict]):
             return
 
 
-def _finish_tool_event(turn: int, tc: ToolCallRequest, r: ToolResult):
+def _finish_tool_event(turn: int, tc: ToolCallRequest, r: ToolResult,
+                       tool_ctx: ToolContext):
+    if r.persisted_path:
+        yield {"type": "tool_result_persisted", "turn": turn,
+               "tool_call_id": tc.id, "name": tc.name,
+               "path": r.persisted_path}
     yield {"type": "tool_result", "turn": turn, "tool_call_id": tc.id,
            "name": tc.name, "ok": r.ok, "result": r.text,
-           "duration_ms": r.duration_ms, "truncated": r.truncated}
+           "duration_ms": r.duration_ms, "truncated": r.truncated,
+           "persisted_path": r.persisted_path, "error_kind": r.error_kind}
     yield {"type": "tool_end", "turn": turn, "tool_call_id": tc.id,
            "name": tc.name, "ok": r.ok, "duration_ms": r.duration_ms,
            "truncated": r.truncated}
+    if r.context_modifier:
+        payload = r.context_modifier(tool_ctx.runtime) or {}
+        r.context_modified = payload
+        yield {"type": "tool_context_modified", "turn": turn,
+               "tool_call_id": tc.id, "name": tc.name, **payload}
     yield {"type": "tool_result_message", "message": tool_message(tc.id, r.ok, r.text)}
 
 

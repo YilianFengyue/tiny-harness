@@ -30,6 +30,8 @@ def test_output_truncation(ctx):
     r = execute_tool("bash", {"command": "python -c \"print('x' * 50000)\""}, ctx)
     assert r.ok and r.truncated and "output truncated" in r.text
     assert len(r.text) < 5000
+    assert r.persisted_path is not None
+    assert (ctx.workdir / r.persisted_path).exists()
 
 
 def test_dangerous_patterns():

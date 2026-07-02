@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,14 @@ DANGEROUS_PATTERNS: list[tuple[str, str]] = [
     (r"\bgit\s+push\s+.*--force", "force push"),
 ]
 
+READ_ONLY_COMMANDS = {
+    "cat", "dir", "echo", "find", "grep", "head", "ls", "pwd", "rg", "sort",
+    "tail", "type", "uniq", "wc", "where", "whereis", "which",
+    "Get-ChildItem", "Get-Content", "Select-String", "Measure-Object",
+}
+
+READ_ONLY_GIT_PREFIXES = ("git status", "git diff", "git log", "git show")
+
 
 def check_dangerous(arguments: dict) -> str | None:
     cmd = arguments.get("command", "")
@@ -40,6 +49,46 @@ def check_dangerous(arguments: dict) -> str | None:
         if re.search(pattern, cmd, re.IGNORECASE):
             return why
     return None
+
+
+def validate_bash_input(ctx: ToolContext, arguments: dict) -> None:
+    command = arguments.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ToolError("command must be a non-empty shell command string")
+
+
+def is_read_only_command(arguments: dict) -> bool:
+    command = str(arguments.get("command", "")).strip()
+    if not command:
+        return False
+    lowered = command.lower()
+    if any(lowered == prefix or lowered.startswith(prefix + " ")
+           for prefix in READ_ONLY_GIT_PREFIXES):
+        return True
+    if re.search(r"(^|[;&|])\s*(>|>>|set-content|out-file|remove-item|rm\b|mv\b|cp\b|"
+                 r"python\b|node\b|npm\b|pip\b|git\s+(?!status|diff|log|show))",
+                 command, re.IGNORECASE):
+        return False
+    parts = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command)
+    saw_command = False
+    for part in parts:
+        if not part.strip():
+            continue
+        try:
+            argv = shlex.split(part, posix=sys.platform != "win32")
+        except ValueError:
+            return False
+        if not argv:
+            continue
+        base = PathLikeCommand(argv[0])
+        if base not in READ_ONLY_COMMANDS:
+            return False
+        saw_command = True
+    return saw_command
+
+
+def PathLikeCommand(value: str) -> str:
+    return value.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
 
 
 def _shell_argv(command: str) -> tuple[list[str] | str, bool]:
@@ -91,6 +140,9 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         },
     },
     dangerous_check=check_dangerous,
+    read_only=is_read_only_command,
+    concurrency_safe=is_read_only_command,
+    validate_input=validate_bash_input,
 )
 def bash(ctx: ToolContext, command: str) -> str:
     if not command.strip():

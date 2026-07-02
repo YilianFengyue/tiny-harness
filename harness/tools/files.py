@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .registry import ToolContext, ToolError, tool
+from .registry import ToolContext, ToolError, ToolResult, ToolRuntimeState, tool
 
 
 def resolve_in_workdir(ctx: ToolContext, path: str) -> Path:
@@ -30,6 +30,48 @@ def _dir_listing(d: Path, limit: int = 50) -> str:
     return ", ".join(e.name + ("/" if e.is_dir() else "") for e in entries)
 
 
+def _validate_path_arg(ctx: ToolContext, arguments: dict) -> None:
+    path = arguments.get("path")
+    if path is not None and not isinstance(path, str):
+        raise ToolError("path must be a string path relative to the workspace root")
+
+
+def _record_read(path: Path, content: str, offset: int, max_lines: int):
+    def modifier(runtime: ToolRuntimeState) -> dict:
+        stat = path.stat()
+        runtime.read_files[str(path)] = {
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "content": content,
+            "offset": offset,
+            "max_lines": max_lines,
+        }
+        return {"kind": "read_file_state", "path": str(path), "size": stat.st_size}
+    return modifier
+
+
+def _record_write(path: Path, action: str, chars: int):
+    def modifier(runtime: ToolRuntimeState) -> dict:
+        stat = path.stat()
+        runtime.file_history.append({
+            "action": action,
+            "path": str(path),
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "chars": chars,
+        })
+        runtime.read_files[str(path)] = {
+            "mtime_ns": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "content": path.read_text(encoding="utf-8", errors="replace"),
+            "offset": 1,
+            "max_lines": None,
+        }
+        return {"kind": "file_write_state", "path": str(path), "action": action,
+                "chars": chars}
+    return modifier
+
+
 @tool(
     name="read_file",
     description=(
@@ -48,9 +90,12 @@ def _dir_listing(d: Path, limit: int = 50) -> str:
                           "description": "Max lines to return (null = 500)"},
         },
     },
+    read_only=True,
+    concurrency_safe=True,
+    validate_input=_validate_path_arg,
 )
 def read_file(ctx: ToolContext, path: str, offset: int | None = None,
-              max_lines: int | None = None) -> str:
+              max_lines: int | None = None) -> ToolResult:
     target = resolve_in_workdir(ctx, path)
     if not target.exists():
         parent = target.parent if target.parent.exists() else ctx.workdir
@@ -61,18 +106,22 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None,
     offset = max(offset or 1, 1)
     max_lines = max_lines or 500
     try:
-        all_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+        content = target.read_text(encoding="utf-8", errors="replace")
+        all_lines = content.splitlines()
     except OSError as e:
         raise ToolError(f"cannot read '{path}': {e}")
     chunk = all_lines[offset - 1: offset - 1 + max_lines]
     if not chunk:
-        return f"(no content: file has {len(all_lines)} lines, offset {offset} is past the end)"
+        return ToolResult(
+            f"(no content: file has {len(all_lines)} lines, offset {offset} is past the end)",
+            context_modifier=_record_read(target, content, offset, max_lines))
     body = "\n".join(f"{i:>6}\t{line}" for i, line in enumerate(chunk, start=offset))
     note = ""
     if offset - 1 + len(chunk) < len(all_lines):
         note = (f"\n... [{len(all_lines) - (offset - 1 + len(chunk))} more lines; "
                 f"continue with offset={offset + len(chunk)}]")
-    return f"{target.name} ({len(all_lines)} lines total)\n{body}{note}"
+    return ToolResult(f"{target.name} ({len(all_lines)} lines total)\n{body}{note}",
+                      context_modifier=_record_read(target, content, offset, max_lines))
 
 
 @tool(
@@ -89,12 +138,17 @@ def read_file(ctx: ToolContext, path: str, offset: int | None = None,
             "content": {"type": "string", "description": "Full file content to write"},
         },
     },
+    destructive=True,
+    validate_input=_validate_path_arg,
 )
 def write_file(ctx: ToolContext, path: str, content: str) -> str:
     target = resolve_in_workdir(ctx, path)
+    existed = target.exists()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
-    return f"wrote {len(content)} chars to {path}"
+    action = "update" if existed else "create"
+    return ToolResult(f"{action}d {len(content)} chars to {path}",
+                      context_modifier=_record_write(target, action, len(content)))
 
 
 @tool(
@@ -111,6 +165,9 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                      "description": "Directory relative to workspace root (null = root)"},
         },
     },
+    read_only=True,
+    concurrency_safe=True,
+    validate_input=_validate_path_arg,
 )
 def list_files(ctx: ToolContext, path: str | None = None) -> str:
     target = resolve_in_workdir(ctx, path or ".")

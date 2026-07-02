@@ -17,10 +17,17 @@
   llm_response  {turn, finish_reason, content, tool_calls, usage, cost_usd,
                  request_id, latency_ms}
   tool_call     {turn, tool_call_id, name, arguments}
+  tool_queued   {turn, tool_call_id, name, arguments}
+  tool_validate {turn, tool_call_id, name, ok, read_only?, concurrency_safe?,
+                 destructive?, error?}
+  tool_permission {turn, tool_call_id, name, ok, reason}
   tool_start    {turn, tool_call_id, name, arguments}
   tool_progress {turn, tool_call_id, name, ...progress}
-  tool_result   {turn, tool_call_id, name, ok, result, duration_ms, truncated}
+  tool_result_persisted {turn, tool_call_id, name, path}
+  tool_result   {turn, tool_call_id, name, ok, result, duration_ms, truncated,
+                 persisted_path, error_kind}
   tool_end      {turn, tool_call_id, name, ok, duration_ms, truncated}
+  tool_context_modified {turn, tool_call_id, name, kind, ...details}
   transition    {turn, kind, reason, ...details}
   context_edit  {turn, cleared_messages, est_tokens_freed, prompt_tokens_before}
   error         {where, error}

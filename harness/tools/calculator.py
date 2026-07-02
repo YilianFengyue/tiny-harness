@@ -29,6 +29,12 @@ _FUNCS = {
 _CONSTS = {"pi": math.pi, "e": math.e}
 
 
+def validate_calculator_input(ctx: ToolContext, arguments: dict) -> None:
+    expression = arguments.get("expression")
+    if not isinstance(expression, str) or not expression.strip():
+        raise ToolError("expression must be a non-empty arithmetic expression string")
+
+
 def _safe_pow(a, b):
     if abs(b) > 10_000 or (abs(a) > 1 and abs(b) * math.log10(abs(a)) > 308):
         raise ToolError("exponent too large; result would overflow")
@@ -80,6 +86,9 @@ def _eval_node(node: ast.AST):
                            "description": "Arithmetic expression, e.g. '(12.5 + 7) / 3' or 'sqrt(2)**2'"},
         },
     },
+    read_only=True,
+    concurrency_safe=True,
+    validate_input=validate_calculator_input,
 )
 def calculator(ctx: ToolContext, expression: str) -> str:
     try:

@@ -1,0 +1,18 @@
+{
+  "total_rows": 1500,
+  "warn_rows": 145,
+  "error_rows": 40,
+  "critical_rows": 13,
+  "non_info_rows": 198,
+  "configs_read": [
+    "config_a.ini",
+    "config_b.ini",
+    "config_c.ini"
+  ],
+  "verification": {
+    "expression": "145 + 40 + 13 <= 1500",
+    "sum_non_info": 198,
+    "remaining_info_or_other": 1302,
+    "passed": true
+  }
+}

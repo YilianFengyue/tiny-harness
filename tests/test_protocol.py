@@ -140,7 +140,8 @@ def test_trajectory_is_complete_and_ordered(make_cfg, make_logger):
     types = [e["type"] for e in events]
     assert types == ["run_start",
                      "turn_start", "llm_request", "stream_request_start",
-                     "llm_response", "tool_call", "tool_start",
+                     "llm_response", "tool_call", "tool_queued",
+                     "tool_validate", "tool_permission", "tool_start",
                      "tool_progress", "tool_result", "tool_end", "transition",
                      "turn_start", "llm_request", "stream_request_start",
                      "assistant_delta", "llm_response", "run_end"]
@@ -158,6 +159,9 @@ def test_trajectory_is_complete_and_ordered(make_cfg, make_logger):
     assert [e["transition"] for e in turn_starts] == [None, "next_turn"]
     assert [e["name"] for e in events if e["type"] == "tool_start"] == ["calculator"]
     assert [e["name"] for e in events if e["type"] == "tool_end"] == ["calculator"]
+    validation = [e for e in events if e["type"] == "tool_validate"][0]
+    assert validation["ok"] and validation["read_only"] and validation["concurrency_safe"]
+    assert [e["ok"] for e in events if e["type"] == "tool_permission"] == [True]
     assert [e["content"] for e in events if e["type"] == "assistant_delta"] == ["answer is 42"]
     end = events[-1]
     assert end["reason"] == "completed" and end["usage_total"]["prompt_tokens"] == 200
