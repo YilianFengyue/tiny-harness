@@ -1,0 +1,5 @@
+{
+  "prompt": "在这个工作区里，有 30 个模块，只有一个地方还在调用 legacy_parse。请先用 grep 或 glob_files 定位唯一调用点，再读取目标文件，用 edit_file 把它改成 parse_v2。不要改 parser.py 里的 legacy_parse 定义。修改后运行 python check.py 验证，并写 patch_report.txt 简短说明改了哪个文件。",
+  "max_turns": 20,
+  "_note": "考察 grep/glob_files 搜索定位、精确编辑、只修改目标文件。"
+}

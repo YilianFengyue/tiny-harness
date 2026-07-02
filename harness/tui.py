@@ -130,6 +130,25 @@ def _print_event(event: dict) -> None:
         print(f"[turn {event['turn']}] start ({transition})")
     elif t == "tool_call":
         print(f"[tool] {event['name']} call_id={event['tool_call_id']}")
+    elif t == "tool_queued":
+        print(f"[tool] queued {event['name']} call_id={event['tool_call_id']}")
+    elif t == "tool_validate":
+        if event.get("ok"):
+            flags = []
+            if event.get("read_only"):
+                flags.append("read")
+            if event.get("concurrency_safe"):
+                flags.append("parallel")
+            if event.get("destructive"):
+                flags.append("write")
+            suffix = f" ({','.join(flags)})" if flags else ""
+            print(f"[tool] validate ok {event['name']}{suffix}")
+        else:
+            print(f"[tool] validate error {event['name']}: {event.get('error')}")
+    elif t == "tool_permission":
+        status = "allow" if event.get("ok") else "deny"
+        reason = f" reason={event.get('reason')}" if event.get("reason") else ""
+        print(f"[tool] permission {status} {event['name']}{reason}")
     elif t == "tool_start":
         print(f"[tool] start {event['name']} call_id={event['tool_call_id']}")
     elif t == "tool_progress":
@@ -141,8 +160,16 @@ def _print_event(event: dict) -> None:
     elif t == "tool_result":
         status = "ok" if event.get("ok") else "error"
         trunc = " truncated" if event.get("truncated") else ""
+        persisted = f" saved={event.get('persisted_path')}" if event.get("persisted_path") else ""
+        err = f" kind={event.get('error_kind')}" if event.get("error_kind") else ""
         print(f"[tool] {status}{trunc} {event['name']} "
-              f"{event.get('duration_ms', 0)}ms")
+              f"{event.get('duration_ms', 0)}ms{persisted}{err}")
+    elif t == "tool_result_persisted":
+        print(f"[tool] persisted {event['name']} -> {event.get('path')}")
+    elif t == "tool_context_modified":
+        details = " ".join(f"{k}={v}" for k, v in event.items()
+                           if k not in {"type", "turn", "tool_call_id", "name"})
+        print(f"[tool] context {event['name']} {details}")
     elif t == "tool_end":
         status = "ok" if event.get("ok") else "error"
         print(f"[tool] end {status} {event['name']} {event.get('duration_ms', 0)}ms")

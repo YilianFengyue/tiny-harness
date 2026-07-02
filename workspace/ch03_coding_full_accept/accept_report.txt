@@ -1,0 +1,7 @@
+changed_files:
+  - services/service_23.py
+  - core/pricing.py
+legacy_call_fixed: true
+zero_division_fixed: true
+final_test_result: "python check.py exit code 0; ALL TESTS PASSED"
+noise_fail_cases: [101, 707, 1313]

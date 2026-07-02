@@ -67,7 +67,7 @@ def is_read_only_command(arguments: dict) -> bool:
         return True
     if re.search(r"(^|[;&|])\s*(>|>>|set-content|out-file|remove-item|rm\b|mv\b|cp\b|"
                  r"python\b|node\b|npm\b|pip\b|git\s+(?!status|diff|log|show))",
-                 command, re.IGNORECASE):
+                 command, re.IGNORECASE) or re.search(r"(^|[^<])>>?", command):
         return False
     parts = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command)
     saw_command = False

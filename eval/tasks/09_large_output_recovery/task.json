@@ -1,0 +1,5 @@
+{
+  "prompt": "请运行 python generate_log.py，并让它把完整日志直接输出一次。日志很长，工具结果可能会落盘；请根据工具返回的保存路径或预览继续分析，找出所有 FAIL 用例，把失败总数、case id 列表、错误码分布写入 report.txt。最后简短说明 report.txt 已写入。",
+  "max_turns": 20,
+  "_note": "考察 tool_result_persisted 后，模型能根据落盘路径/预览继续恢复并完成报告。"
+}

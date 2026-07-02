@@ -1,0 +1,5 @@
+{
+  "prompt": "修复 app.py 中 compute_score 在 total=0 时会崩溃的问题。只做最小修改，不要重写整个文件。请先定位和读取相关代码，使用精确编辑工具修改，然后运行 python check.py 验证，最后写 fix_report.txt 并简短总结。",
+  "max_turns": 18,
+  "_note": "考察 read_file -> edit_file -> bash/test，且禁止用 write_file 覆写 app.py。"
+}

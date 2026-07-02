@@ -860,3 +860,37 @@ pytest>=8.0      # 仅测试用
 ```
 
 没有 LangChain、没有 python-dotenv、没有 tiktoken、没有 requests——最小依赖证明我们知道每一层在做什么。
+
+---
+
+## 13. CH03 ProMax 增量：Coding 工具体系
+
+CH03 的第二大步在原有 `calculator/read_file/write_file/list_files/bash` 之上，补齐 coding agent 常用的“找、读、改、验”闭环：
+
+| 工具 | 定位 | 关键约束 |
+|---|---|---|
+| `edit_file` | 精确编辑已有文本文件 | 必须先 `read_file`；默认 `old_string` 唯一；多处命中需扩大上下文或 `replace_all=true` |
+| `write_file` | 创建/覆写完整文件 | 创建新文件可直接写；覆写已有文件前必须先读且文件未变化 |
+| `glob_files` | 按文件名找文件 | 优先 `rg --files`，稳定排序，结果限量 |
+| `grep` | 按内容定位代码 | 返回文件、行号、匹配行，支持 include glob 和上下文行 |
+| `file_info` | 文件体检 | 返回类型、大小、mtime、UTF-8 可读性、行数 |
+| `show_diff` | 修改复核 | git 仓库走 `git diff`，非 git 场景用运行时 file history |
+
+工具生命周期也进一步显式化：trajectory/TUI/Viewer 都能看到 `tool_queued`、`tool_validate`、`tool_permission`、`tool_start`、`tool_result`、`tool_result_persisted`、`tool_context_modified`、`tool_end`。这对应 Claude Code 类实现里的“为什么等待、为什么拒绝、是否并发、结果是否落盘、上下文状态改了什么”。
+
+新增 coding eval：
+
+```powershell
+python eval/run_eval.py --tasks 07,08,09 --runs 1 --max-cost 0.5
+```
+
+- `07_precise_edit`：修一个函数的除零 bug，验 `read_file -> edit_file -> bash/test`，禁止整文件覆写。
+- `08_search_then_patch`：跨 30 个文件定位唯一调用点，验必须用 `grep` 或 `glob_files`，且只编辑目标文件。
+- `09_large_output_recovery`：故意产生超长工具输出，验 `tool_result_persisted` 后仍能根据落盘内容完成报告。
+
+离线测试当前覆盖：
+
+```powershell
+python -m pytest -q
+# 62 passed
+```

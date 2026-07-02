@@ -321,6 +321,8 @@ pre.json{
 .bar-retry{background:var(--c-yellow-dim);border:1px solid var(--c-yellow);color:var(--c-yellow)}
 .bar-ctx{background:var(--c-purple-dim);border:1px solid var(--c-purple);color:var(--c-purple)}
 .bar-error{background:var(--c-red-dim);border:1px solid var(--c-red);color:var(--c-red)}
+.bar-tool{background:var(--panel2);border:1px solid var(--border);color:var(--dim)}
+.bar-tool b{color:var(--text);font-weight:600}
 .bar .sub{color:var(--dim)}
 
 /* run_start / run_end 卡片 */
@@ -453,7 +455,10 @@ pre.json{
 
 var EVENT_TYPES = [
   ['run_start','启动'], ['llm_request','请求'], ['llm_response','响应'],
-  ['tool_call','工具调用'], ['tool_result','工具结果'], ['retry','重试'],
+  ['tool_call','工具调用'], ['tool_queued','工具排队'], ['tool_validate','工具校验'],
+  ['tool_permission','权限'], ['tool_start','工具开始'], ['tool_progress','工具进度'],
+  ['tool_result','工具结果'], ['tool_end','工具结束'],
+  ['tool_result_persisted','结果落盘'], ['tool_context_modified','上下文修改'], ['retry','重试'],
   ['context_edit','上下文清理'], ['error','错误'], ['run_end','结束'],
 ];
 
@@ -1136,6 +1141,24 @@ function renderContextEdit(ev){
   return div;
 }
 
+function renderToolLifecycle(ev){
+  var div = document.createElement('div');
+  div.className = 'bar bar-tool';
+  var bits = ['<b>' + escapeHtml(ev.type) + '</b>',
+              '<span>' + escapeHtml(ev.name || '?') + '</span>'];
+  if (ev.tool_call_id) bits.push('<span class="sub">' + escapeHtml(ev.tool_call_id) + '</span>');
+  if (ev.ok != null) bits.push(ev.ok ? '<span class="ok">ok</span>' : '<span class="bad">blocked/error</span>');
+  if (ev.read_only) bits.push('<span class="badge">read</span>');
+  if (ev.concurrency_safe) bits.push('<span class="badge">parallel</span>');
+  if (ev.destructive) bits.push('<span class="badge badge-warn">write</span>');
+  if (ev.reason) bits.push('<span class="sub">reason ' + escapeHtml(String(ev.reason)) + '</span>');
+  if (ev.error) bits.push('<span class="sub">error ' + escapeHtml(String(ev.error)) + '</span>');
+  if (ev.path) bits.push('<span class="sub">path ' + escapeHtml(String(ev.path)) + '</span>');
+  if (ev.kind) bits.push('<span class="sub">kind ' + escapeHtml(String(ev.kind)) + '</span>');
+  div.innerHTML = bits.join(' ');
+  return div;
+}
+
 function renderError(ev){
   var div = document.createElement('div');
   div.className = 'bar bar-error';
@@ -1196,6 +1219,15 @@ function appendEvent(ev, idx, frag){
     case 'llm_request':  node = renderLlmRequest(ev); break;
     case 'llm_response': node = renderLlmResponse(ev, card); break;
     case 'tool_call':    node = renderToolCall(ev); break;
+    case 'tool_queued':
+    case 'tool_validate':
+    case 'tool_permission':
+    case 'tool_start':
+    case 'tool_progress':
+    case 'tool_end':
+    case 'tool_result_persisted':
+    case 'tool_context_modified':
+                         node = renderToolLifecycle(ev); break;
     case 'tool_result':  node = renderToolResult(ev); break;
     case 'retry':        node = renderRetry(ev); break;
     case 'context_edit': node = renderContextEdit(ev); break;
