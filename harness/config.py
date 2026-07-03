@@ -71,6 +71,7 @@ class Config:
     bash_timeout: int = 60             # 秒
     max_retries: int = 5
     yolo: bool = False                 # True 时跳过危险命令确认
+    permission_mode: str = "default"   # default/plan/acceptEdits/bypass/dontAsk
     skills: list[str] = field(default_factory=list)
     runs_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "runs")
 
@@ -84,5 +85,8 @@ class Config:
             cfg.base_url = os.environ.get("OPENAI_BASE_URL") or None
         if "model" not in overrides:
             cfg.model = os.environ.get("TINY_HARNESS_MODEL", cfg.model)
+        if "permission_mode" not in overrides:
+            cfg.permission_mode = os.environ.get("TINY_HARNESS_PERMISSION_MODE",
+                                                 cfg.permission_mode)
         cfg.workdir = Path(cfg.workdir).resolve()
         return cfg

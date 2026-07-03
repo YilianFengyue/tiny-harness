@@ -35,6 +35,7 @@ class ToolRuntimeState:
     read_files: dict[str, dict] = field(default_factory=dict)
     file_history: list[dict] = field(default_factory=list)
     persisted_results: dict[str, str] = field(default_factory=dict)
+    permission_context: object | None = None
 
 
 @dataclass

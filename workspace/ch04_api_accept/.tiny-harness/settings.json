@@ -1,0 +1,15 @@
+﻿{
+  "permissions": {
+    "mode": "acceptEdits",
+    "allow": [
+      "Bash(python *)"
+    ],
+    "ask": [
+      "Bash(python -c *)"
+    ],
+    "deny": [
+      "Bash(rm *)",
+      "Bash(del *)"
+    ]
+  }
+}

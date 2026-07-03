@@ -135,7 +135,9 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
         "workdir": str(cfg.workdir),
         "config": {"max_turns": cfg.max_turns, "max_cost_usd": cfg.max_cost_usd,
                    "context_budget": cfg.context_budget,
-                   "reasoning_effort": cfg.reasoning_effort},
+                   "reasoning_effort": cfg.reasoning_effort,
+                   "permission_mode": cfg.permission_mode,
+                   "yolo": cfg.yolo},
         "sdk_version": _openai_version(),
         "skills": cfg.skills,
         "session_id": session_id,
@@ -405,12 +407,17 @@ def _preflight_tool_events(tc: ToolCallRequest, tool_ctx: ToolContext,
            "concurrency_safe": tool_property(spec, "concurrency_safe", tc.arguments or {}),
            "destructive": tool_property(spec, "destructive", tc.arguments or {})}
 
-    allowed, why = gate_tool_call(spec.name, tc.arguments, cfg)
+    decision = gate_tool_call(spec.name, tc.arguments or {}, cfg, tool_ctx)
     yield {"type": "tool_permission", "turn": turn, "tool_call_id": tc.id,
-           "name": spec.name, "ok": allowed, "reason": why}
-    if not allowed:
+           "name": spec.name, "ok": decision.allowed,
+           "decision": decision.behavior, "reason": decision.message,
+           "reason_type": decision.reason_type, "rule": decision.rule,
+           "source": decision.source, "mode": decision.mode,
+           "safety_check": decision.safety_check,
+           "suggestions": list(decision.suggestions)}
+    if not decision.allowed:
         yield {"type": "tool_preflight_result",
-               "result": ToolResult(denial_message(spec.name, why), ok=False,
+               "result": ToolResult(denial_message(spec.name, decision), ok=False,
                                     error_kind="permission_denied")}
 
 

@@ -1,0 +1,2 @@
+修复内容：更新 src/security.py 中的 normalize_user，去除首尾空白、统一小写，并将多个内部空白折叠为一个空格。
+测试结果：已运行 python check.py，输出 all checks passed，验证通过。

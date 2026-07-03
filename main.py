@@ -46,6 +46,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--resume", metavar="RUN_ID", help="从该 run 的消息现场继续")
     p.add_argument("--runs-dir", default=None)
     p.add_argument("--yolo", action="store_true", help="跳过危险命令确认（eval 自动化用）")
+    p.add_argument("--permission-mode", default="default",
+                   choices=["default", "plan", "acceptEdits", "bypass", "dontAsk"],
+                   help="权限模式：default/plan/acceptEdits/bypass/dontAsk")
     return p.parse_args(argv)
 
 
@@ -78,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_completion_tokens": args.max_completion_tokens,
             "skills": args.skill,
             "yolo": args.yolo,
+            "permission_mode": args.permission_mode,
         }
         if args.model:
             overrides["model"] = args.model
@@ -105,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         "reasoning_effort": args.reasoning_effort,
         "max_completion_tokens": args.max_completion_tokens,
         "skills": args.skill, "yolo": args.yolo,
+        "permission_mode": args.permission_mode,
     }
     if args.model:
         overrides["model"] = args.model
