@@ -17,6 +17,8 @@ PermissionBehavior = Literal["allow", "deny", "ask", "passthrough"]
 PermissionMode = Literal["default", "plan", "acceptEdits", "bypass", "dontAsk"]
 PermissionSource = Literal["project", "local", "session", "cli", "policy"]
 PermissionUpdateKind = Literal["addRules", "replaceRules", "removeRules", "setMode"]
+PERMISSION_MODES: tuple[PermissionMode, ...] = (
+    "default", "plan", "acceptEdits", "bypass", "dontAsk")
 
 CANONICAL_TOOL_NAMES = {
     "bash": "bash",
@@ -135,6 +137,18 @@ def normalize_tool_name(name: str) -> str:
     return CANONICAL_TOOL_NAMES.get(name, name)
 
 
+def display_tool_name(name: str) -> str:
+    canonical = normalize_tool_name(name)
+    return {
+        "bash": "Bash",
+        "read_file": "Read",
+        "write_file": "Write",
+        "edit_file": "Edit",
+        "glob_files": "Glob",
+        "grep": "Grep",
+    }.get(canonical, canonical)
+
+
 def permission_rule_value_from_string(text: str) -> PermissionRuleValue:
     text = text.strip()
     if not text:
@@ -153,6 +167,42 @@ def permission_rule_value_to_string(value: PermissionRuleValue) -> str:
     if value.rule_content is None:
         return value.tool_name
     return f"{value.tool_name}({escape_rule_content(value.rule_content)})"
+
+
+def suggest_permission_rule_value(tool_name: str,
+                                  arguments: Mapping[str, object]) -> PermissionRuleValue:
+    display = display_tool_name(tool_name)
+    canonical = normalize_tool_name(tool_name)
+    if canonical == "bash":
+        command = str(arguments.get("command") or "").strip()
+        return PermissionRuleValue(display, command or None)
+    if canonical in {"read_file", "write_file", "edit_file", "glob_files", "grep"}:
+        path = arguments.get("path") or arguments.get("pattern")
+        return PermissionRuleValue(display, str(path)) if path else PermissionRuleValue(display)
+    return PermissionRuleValue(display)
+
+
+def format_permission_context(context: PermissionContext) -> str:
+    lines = [f"mode: {context.mode}"]
+    if not context.rules:
+        lines.append("(no permission rules)")
+        return "\n".join(lines)
+    for behavior in ("deny", "ask", "allow"):
+        items = [rule for rule in context.rules if rule.behavior == behavior]
+        if not items:
+            continue
+        lines.append(f"{behavior}:")
+        for rule in items:
+            value = permission_rule_value_to_string(rule.value)
+            lines.append(f"  - [{rule.source}] {value}")
+    return "\n".join(lines)
+
+
+def summarize_permission_update(update: PermissionUpdate) -> str:
+    if update.kind == "setMode":
+        return f"set {update.destination} mode to {update.mode}"
+    values = ", ".join(permission_rule_value_to_string(v) for v in update.rules) or "(none)"
+    return f"{update.kind} {update.destination} {update.behavior}: {values}"
 
 
 def escape_rule_content(text: str) -> str:
@@ -226,7 +276,7 @@ def load_permission_context(workdir: Path, mode_override: str | None = None,
         permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
         if isinstance(permissions, dict):
             loaded_mode = permissions.get("mode")
-            if loaded_mode in _permission_modes():
+            if loaded_mode in PERMISSION_MODES:
                 mode = loaded_mode
             rules.extend(_rules_from_settings(source, permissions))
     rules.extend(_cli_rules("cli", "allow", cli_allow))
@@ -369,7 +419,7 @@ def _read_settings(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
@@ -400,7 +450,7 @@ def _context_from_permissions(source: PermissionSource,
                               permissions: Mapping[str, object]) -> PermissionContext:
     mode = permissions.get("mode")
     return PermissionContext(
-        mode=mode if mode in _permission_modes() else "default",
+        mode=mode if mode in PERMISSION_MODES else "default",
         rules=tuple(_rules_from_settings(source, permissions)),
     )
 
@@ -411,13 +461,9 @@ def _settings_path(workdir: Path, destination: PermissionSource) -> Path:
 
 
 def _coerce_mode(raw: str) -> PermissionMode:
-    if raw not in _permission_modes():
+    if raw not in PERMISSION_MODES:
         raise ValueError(f"unknown permission mode: {raw}")
     return raw  # type: ignore[return-value]
-
-
-def _permission_modes() -> tuple[str, ...]:
-    return ("default", "plan", "acceptEdits", "bypass", "dontAsk")
 
 
 def _rule_key(rule: PermissionRule) -> tuple[str, str, str, str | None]:

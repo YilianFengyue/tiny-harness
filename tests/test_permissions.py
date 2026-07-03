@@ -3,7 +3,11 @@ import threading
 
 from conftest import MockProvider, turn
 
-from harness.hooks import gate_tool_call
+from harness.hooks import (
+    evaluate_tool_permission,
+    gate_tool_call,
+    resolve_permission_decision,
+)
 from harness.loop import run_agent
 from harness.permissions import (
     PermissionContext,
@@ -111,7 +115,7 @@ def test_deny_and_ask_rules_precede_yolo_and_allow(make_cfg, tmp_path):
     cfg = make_cfg(workdir=workdir, yolo=True, permission_mode="bypass")
     ctx = ToolContext(workdir=workdir)
 
-    asked = gate_tool_call("bash", {"command": "npm test"}, cfg, ctx)
+    asked = evaluate_tool_permission("bash", {"command": "npm test"}, cfg, ctx)
     denied = gate_tool_call("bash", {"command": "rm tmp.txt"}, cfg, ctx)
     allowed = gate_tool_call("bash", {"command": "npm run lint"}, cfg, ctx)
 
@@ -130,6 +134,47 @@ def test_sensitive_path_safety_survives_bypass_and_yolo(make_cfg, tmp_path):
     assert decision.behavior == "deny"
     assert decision.safety_check
     assert decision.reason_type == "safety_check"
+
+
+def test_settings_mode_applies_when_cli_mode_is_default(make_cfg, tmp_path):
+    workdir = tmp_path / "ws"
+    (workdir / ".tiny-harness").mkdir(parents=True)
+    (workdir / ".tiny-harness" / "settings.json").write_text(json.dumps({
+        "permissions": {"mode": "acceptEdits"}
+    }), encoding="utf-8")
+    cfg = make_cfg(workdir=workdir)
+    decision = gate_tool_call("write_file", {"path": "note.txt", "content": "hello"},
+                              cfg, ToolContext(workdir=workdir))
+
+    assert decision.allowed
+    assert decision.reason_type == "mode"
+    assert decision.mode == "acceptEdits"
+
+
+def test_settings_json_allows_utf8_bom_from_powershell(make_cfg, tmp_path):
+    workdir = tmp_path / "ws"
+    settings = workdir / ".tiny-harness" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({
+        "permissions": {
+            "mode": "acceptEdits",
+            "allow": ["Bash(python *)"],
+            "ask": ["Bash(python -c *)"],
+        }
+    }), encoding="utf-8-sig")
+    cfg = make_cfg(workdir=workdir)
+    ctx = ToolContext(workdir=workdir)
+
+    edit_decision = gate_tool_call("write_file", {"path": "note.txt", "content": "ok"},
+                                   cfg, ctx)
+    allowed = evaluate_tool_permission("bash", {"command": "python check.py"}, cfg, ctx)
+    asked = evaluate_tool_permission("bash", {"command": "python -c \"print(1)\""},
+                                     cfg, ctx)
+
+    assert edit_decision.allowed
+    assert edit_decision.mode == "acceptEdits"
+    assert allowed.allowed and allowed.rule == "Bash(python *)"
+    assert asked.behavior == "ask" and asked.rule == "Bash(python -c *)"
 
 
 def test_passthrough_becomes_denied_ask_in_noninteractive_loop(make_cfg, make_logger):
@@ -168,3 +213,46 @@ def test_tool_permission_event_explains_rule_and_mode(make_cfg, make_logger, tmp
     assert permission["reason_type"] == "rule"
     assert permission["rule"] == "Bash(rm *)"
     assert permission["mode"] == "bypass"
+
+
+def test_ask_permission_emits_wait_and_resolved_events(make_cfg, make_logger, tmp_path):
+    workdir = tmp_path / "ws"
+    (workdir / ".tiny-harness").mkdir(parents=True)
+    (workdir / ".tiny-harness" / "settings.json").write_text(json.dumps({
+        "permissions": {"ask": ["Bash(python -c *)"]}
+    }), encoding="utf-8")
+    cfg = make_cfg(workdir=workdir)
+    logger = make_logger()
+    provider = MockProvider([
+        turn(calls=[("c1", "bash", '{"command": "python -c \\"print(1)\\""}')]),
+        turn(content="blocked"),
+    ])
+
+    run_agent("try ask command", cfg, provider, logger)
+    events = read_trajectory(cfg.runs_dir, logger.run_id)
+
+    assert any(e["type"] == "tool_permission_wait" and e["reason_type"] == "rule"
+               for e in events)
+    assert any(e["type"] == "tool_permission_resolved"
+               and e["resolver"] == "noninteractive"
+               and e["decision"] == "deny" for e in events)
+
+
+def test_interactive_session_allow_updates_memory_context(make_cfg, monkeypatch, tmp_path):
+    workdir = tmp_path / "ws"
+    workdir.mkdir()
+    cfg = make_cfg(workdir=workdir)
+    ctx = ToolContext(workdir=workdir)
+    decision = evaluate_tool_permission("bash", {"command": "python check.py"}, cfg, ctx)
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "s")
+    final, events = resolve_permission_decision(
+        "bash", {"command": "python check.py"}, cfg, ctx, decision)
+    second = evaluate_tool_permission("bash", {"command": "python check.py"}, cfg, ctx)
+
+    assert final.allowed
+    assert any(e["type"] == "tool_permission_update" and not e["persisted"]
+               for e in events)
+    assert second.allowed
+    assert second.reason_type == "rule"

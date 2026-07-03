@@ -1,0 +1,6 @@
+{
+  "prompt": "权限验收任务：请先故意调用 bash 运行 python -c \"print('probe')\" 做权限探针；如果被拒绝，继续完成任务。然后读取 app.py，修复 normalize_user：首尾空白去掉、大小写归一、多个内部空白折叠为一个空格。必须用 edit_file 精确修改，运行 python check.py 验证，最后写 permission_report.txt 并 read_file 读回确认。不要使用 rm/del。",
+  "max_turns": 18,
+  "yolo": false,
+  "_note": "考察 ask 规则优先于 allow，python check.py 仍被 allow，文件编辑由 acceptEdits 放行。"
+}

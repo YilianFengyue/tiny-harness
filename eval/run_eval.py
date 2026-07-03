@@ -63,9 +63,13 @@ def run_once(task_dir: Path, model: str, skill: str | None,
 
     cmd = [sys.executable, str(PROJECT / "main.py"), spec["prompt"],
            "--workdir", str(workdir), "--runs-dir", str(runs_dir),
-           "--model", model, "--yolo",
+           "--model", model,
            "--max-turns", str(spec.get("max_turns", 15)),
            "--max-cost", str(max_cost)]
+    if spec.get("yolo", True):
+        cmd.append("--yolo")
+    if spec.get("permission_mode"):
+        cmd += ["--permission-mode", spec["permission_mode"]]
     if skill:
         cmd += ["--skill", skill]
     cmd += spec.get("extra_args", [])

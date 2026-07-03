@@ -5,6 +5,16 @@ import sys
 from pathlib import Path
 
 from .config import Config
+from .permissions import (
+    PERMISSION_MODES,
+    PermissionUpdate,
+    apply_permission_update,
+    format_permission_context,
+    load_permission_context,
+    permission_rule_value_from_string,
+    persist_permission_updates,
+    summarize_permission_update,
+)
 from .providers.base import Provider
 from .session import AgentSession
 
@@ -65,7 +75,7 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> No
     if resume_run_id:
         print(f"resumed:    {resume_run_id}")
     print("-" * 64)
-    print("Commands: /help  /cost  /trace  /runs  /exit")
+    print("Commands: /help  /cost  /trace  /runs  /permissions  /exit")
     print("=" * 64)
 
 
@@ -79,6 +89,11 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print("  /cost   Show cumulative session token/cost totals")
         print("  /trace  Print latest trajectory path and viewer URL")
         print("  /runs   List recent run ids in this runs directory")
+        print("  /permissions  Show active permission mode/rules")
+        print("  /allow <rule> [local|project]  Add allow rule")
+        print("  /deny <rule> [local|project]   Add deny rule")
+        print("  /ask <rule> [local|project]    Add ask rule")
+        print("  /mode <mode> [local|project]   Set permission mode")
         print("  /exit   Quit the TUI session")
         return False
     if name == "/cost":
@@ -110,11 +125,70 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
             mark = " *" if p.name == session.last_run_id else "  "
             print(f"{mark} {p.name}")
         return False
+    if name == "/permissions":
+        context = load_permission_context(cfg.workdir, _mode_override(cfg))
+        print(format_permission_context(context))
+        return False
+    if name in ("/allow", "/deny", "/ask"):
+        _handle_rule_command(name[1:], rest, cfg)
+        return False
+    if name == "/mode":
+        _handle_mode_command(rest, cfg)
+        return False
 
     print(f"Unknown command: {name}. Try /help.")
     if rest:
         print(f"(ignored trailing text: {rest})")
     return False
+
+
+def _handle_rule_command(behavior: str, text: str, cfg: Config) -> None:
+    raw, destination = _split_destination(text)
+    if not raw:
+        print(f"Usage: /{behavior} <rule> [local|project]")
+        return
+    try:
+        update = PermissionUpdate(
+            "addRules", destination, behavior,
+            (permission_rule_value_from_string(raw),))
+    except ValueError as e:
+        print(f"Invalid rule: {e}")
+        return
+    context = apply_permission_update(
+        load_permission_context(cfg.workdir, _mode_override(cfg)), update)
+    if destination in {"local", "project"}:
+        persist_permission_updates(cfg.workdir, (update,))
+    print(summarize_permission_update(update))
+    print(format_permission_context(context))
+
+
+def _handle_mode_command(text: str, cfg: Config) -> None:
+    raw, destination = _split_destination(text)
+    if raw not in PERMISSION_MODES:
+        print("Usage: /mode <default|plan|acceptEdits|bypass|dontAsk> [local|project]")
+        return
+    update = PermissionUpdate("setMode", destination, mode=raw)
+    context = apply_permission_update(
+        load_permission_context(cfg.workdir, _mode_override(cfg)), update)
+    cfg.permission_mode = raw
+    if destination in {"local", "project"}:
+        persist_permission_updates(cfg.workdir, (update,))
+    print(summarize_permission_update(update))
+    print(format_permission_context(context))
+
+
+def _split_destination(text: str) -> tuple[str, str]:
+    text = text.strip()
+    if not text:
+        return "", "local"
+    parts = text.rsplit(maxsplit=1)
+    if len(parts) == 2 and parts[1] in {"local", "project", "session"}:
+        return parts[0].strip(), parts[1]
+    return text, "local"
+
+
+def _mode_override(cfg: Config) -> str | None:
+    return None if cfg.permission_mode == "default" else cfg.permission_mode
 
 
 def _print_event(event: dict) -> None:
@@ -146,9 +220,20 @@ def _print_event(event: dict) -> None:
         else:
             print(f"[tool] validate error {event['name']}: {event.get('error')}")
     elif t == "tool_permission":
-        status = "allow" if event.get("ok") else "deny"
-        reason = f" reason={event.get('reason')}" if event.get("reason") else ""
-        print(f"[tool] permission {status} {event['name']}{reason}")
+        status = event.get("decision") or ("allow" if event.get("ok") else "deny")
+        details = _permission_details(event)
+        print(f"[tool] permission {status} {event['name']}{details}")
+    elif t == "tool_permission_wait":
+        details = _permission_details(event)
+        print(f"[tool] permission waiting {event['name']}{details}")
+    elif t == "tool_permission_resolved":
+        status = event.get("decision") or ("allow" if event.get("ok") else "deny")
+        resolver = event.get("resolver") or "unknown"
+        details = _permission_details(event)
+        print(f"[tool] permission resolved {status} by={resolver} {event['name']}{details}")
+    elif t == "tool_permission_update":
+        persisted = "persisted" if event.get("persisted") else "memory"
+        print(f"[tool] permission update {persisted} {event.get('summary')}")
     elif t == "tool_start":
         print(f"[tool] start {event['name']} call_id={event['tool_call_id']}")
     elif t == "tool_progress":
@@ -190,3 +275,15 @@ def _rel(path: Path) -> Path:
         return path.relative_to(Path.cwd())
     except ValueError:
         return path
+
+
+def _permission_details(event: dict) -> str:
+    parts = []
+    for key in ("reason_type", "mode", "rule", "source"):
+        if event.get(key):
+            parts.append(f"{key}={event[key]}")
+    if event.get("safety_check"):
+        parts.append("safety_check=true")
+    if event.get("reason"):
+        parts.append(f"reason={event['reason']}")
+    return (" " + " ".join(parts)) if parts else ""

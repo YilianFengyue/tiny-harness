@@ -323,6 +323,13 @@ pre.json{
 .bar-error{background:var(--c-red-dim);border:1px solid var(--c-red);color:var(--c-red)}
 .bar-tool{background:var(--panel2);border:1px solid var(--border);color:var(--dim)}
 .bar-tool b{color:var(--text);font-weight:600}
+.bar-perm{background:var(--c-blue-dim);border:1px solid var(--c-blue);color:var(--dim)}
+.bar-perm.allow{background:var(--c-green-dim);border-color:var(--c-green)}
+.bar-perm.ask{background:var(--c-yellow-dim);border-color:var(--c-yellow)}
+.bar-perm.deny{background:var(--c-red-dim);border-color:var(--c-red)}
+.bar-perm .decision-allow{color:var(--c-green);font-weight:700}
+.bar-perm .decision-ask{color:var(--c-yellow);font-weight:700}
+.bar-perm .decision-deny{color:var(--c-red);font-weight:700}
 .bar .sub{color:var(--dim)}
 
 /* run_start / run_end 卡片 */
@@ -456,7 +463,9 @@ pre.json{
 var EVENT_TYPES = [
   ['run_start','启动'], ['llm_request','请求'], ['llm_response','响应'],
   ['tool_call','工具调用'], ['tool_queued','工具排队'], ['tool_validate','工具校验'],
-  ['tool_permission','权限'], ['tool_start','工具开始'], ['tool_progress','工具进度'],
+  ['tool_permission','权限'], ['tool_permission_wait','权限等待'],
+  ['tool_permission_resolved','权限解决'], ['tool_permission_update','权限更新'],
+  ['tool_start','工具开始'], ['tool_progress','工具进度'],
   ['tool_result','工具结果'], ['tool_end','工具结束'],
   ['tool_result_persisted','结果落盘'], ['tool_context_modified','上下文修改'], ['retry','重试'],
   ['context_edit','上下文清理'], ['error','错误'], ['run_end','结束'],
@@ -1143,15 +1152,29 @@ function renderContextEdit(ev){
 
 function renderToolLifecycle(ev){
   var div = document.createElement('div');
-  div.className = 'bar bar-tool';
+  var isPerm = ev.type && ev.type.indexOf('tool_permission') === 0;
+  var decision = ev.decision || (ev.ok === true ? 'allow' : ev.ok === false ? 'deny' : '');
+  div.className = 'bar ' + (isPerm ? 'bar-perm ' + (decision || 'ask') : 'bar-tool');
   var bits = ['<b>' + escapeHtml(ev.type) + '</b>',
               '<span>' + escapeHtml(ev.name || '?') + '</span>'];
   if (ev.tool_call_id) bits.push('<span class="sub">' + escapeHtml(ev.tool_call_id) + '</span>');
-  if (ev.ok != null) bits.push(ev.ok ? '<span class="ok">ok</span>' : '<span class="bad">blocked/error</span>');
+  if (decision) bits.push('<span class="decision-' + escapeHtml(decision) + '">' + escapeHtml(decision) + '</span>');
+  else if (ev.ok != null) bits.push(ev.ok ? '<span class="ok">ok</span>' : '<span class="bad">blocked/error</span>');
   if (ev.read_only) bits.push('<span class="badge">read</span>');
   if (ev.concurrency_safe) bits.push('<span class="badge">parallel</span>');
   if (ev.destructive) bits.push('<span class="badge badge-warn">write</span>');
+  if (ev.reason_type) bits.push('<span class="badge">' + escapeHtml(String(ev.reason_type)) + '</span>');
+  if (ev.mode) bits.push('<span class="sub">mode ' + escapeHtml(String(ev.mode)) + '</span>');
+  if (ev.rule) bits.push('<span class="sub">rule ' + escapeHtml(String(ev.rule)) + '</span>');
+  if (ev.source) bits.push('<span class="sub">source ' + escapeHtml(String(ev.source)) + '</span>');
+  if (ev.resolver) bits.push('<span class="sub">resolver ' + escapeHtml(String(ev.resolver)) + '</span>');
+  if (ev.persisted != null) bits.push('<span class="sub">' + (ev.persisted ? 'persisted' : 'memory') + '</span>');
+  if (ev.summary) bits.push('<span class="sub">' + escapeHtml(String(ev.summary)) + '</span>');
+  if (ev.safety_check) bits.push('<span class="badge badge-err">safety</span>');
   if (ev.reason) bits.push('<span class="sub">reason ' + escapeHtml(String(ev.reason)) + '</span>');
+  if (ev.suggestions && ev.suggestions.length) {
+    bits.push('<span class="sub">suggest ' + escapeHtml(ev.suggestions.join(' · ')) + '</span>');
+  }
   if (ev.error) bits.push('<span class="sub">error ' + escapeHtml(String(ev.error)) + '</span>');
   if (ev.path) bits.push('<span class="sub">path ' + escapeHtml(String(ev.path)) + '</span>');
   if (ev.kind) bits.push('<span class="sub">kind ' + escapeHtml(String(ev.kind)) + '</span>');
@@ -1222,6 +1245,9 @@ function appendEvent(ev, idx, frag){
     case 'tool_queued':
     case 'tool_validate':
     case 'tool_permission':
+    case 'tool_permission_wait':
+    case 'tool_permission_resolved':
+    case 'tool_permission_update':
     case 'tool_start':
     case 'tool_progress':
     case 'tool_end':

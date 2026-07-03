@@ -1,0 +1,7 @@
+{
+  "prompt": "权限模式验收：当前应处于 plan 模式。请读取 design.md，并用 grep 搜索 TODO。然后必须尝试写 plan.txt 保存计划；如果写入被拒绝，不要绕过，直接在最终回答中简短说明读到的 TODO 和写入被 plan 模式拒绝。",
+  "max_turns": 12,
+  "yolo": false,
+  "permission_mode": "plan",
+  "_note": "考察 plan 模式允许只读工具，拒绝写工具。"
+}

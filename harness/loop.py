@@ -22,7 +22,11 @@ import time
 from .cancel import CancelledError, CancellationToken
 from .config import Config, load_pricing
 from .context import ContextManager, strip_internal_marks
-from .hooks import denial_message, gate_tool_call
+from .hooks import (
+    denial_message,
+    evaluate_tool_permission,
+    resolve_permission_decision,
+)
 from .providers.base import ModelTurn, Provider, ToolCallRequest
 from .skills import render_skills_section
 from .telemetry import CostLedger, RunLogger
@@ -407,7 +411,7 @@ def _preflight_tool_events(tc: ToolCallRequest, tool_ctx: ToolContext,
            "concurrency_safe": tool_property(spec, "concurrency_safe", tc.arguments or {}),
            "destructive": tool_property(spec, "destructive", tc.arguments or {})}
 
-    decision = gate_tool_call(spec.name, tc.arguments or {}, cfg, tool_ctx)
+    decision = evaluate_tool_permission(spec.name, tc.arguments or {}, cfg, tool_ctx)
     yield {"type": "tool_permission", "turn": turn, "tool_call_id": tc.id,
            "name": spec.name, "ok": decision.allowed,
            "decision": decision.behavior, "reason": decision.message,
@@ -415,6 +419,14 @@ def _preflight_tool_events(tc: ToolCallRequest, tool_ctx: ToolContext,
            "source": decision.source, "mode": decision.mode,
            "safety_check": decision.safety_check,
            "suggestions": list(decision.suggestions)}
+    if decision.behavior == "ask":
+        decision, permission_events = resolve_permission_decision(
+            spec.name, tc.arguments or {}, cfg, tool_ctx, decision)
+        for event in permission_events:
+            event = dict(event)
+            type_ = event.pop("type")
+            yield {"type": type_, "turn": turn, "tool_call_id": tc.id,
+                   "name": spec.name, **event}
     if not decision.allowed:
         yield {"type": "tool_preflight_result",
                "result": ToolResult(denial_message(spec.name, decision), ok=False,

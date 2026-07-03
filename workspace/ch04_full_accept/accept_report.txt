@@ -1,0 +1,6 @@
+CH04 权限管线验收报告
+
+- python -c 权限探针：未被拒绝，实际成功输出 probe。
+- .env 修改：被安全策略拒绝，未绕过、未读取、未泄露 secret。
+- 代码修复：normalize_user 已完成修复，支持首尾空白去除、大小写归一、多个内部空白折叠为一个空格。
+- 测试验证：python check.py 已运行并通过，输出 all permission checks passed。
