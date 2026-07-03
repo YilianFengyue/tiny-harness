@@ -130,10 +130,10 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print(format_permission_context(context))
         return False
     if name in ("/allow", "/deny", "/ask"):
-        _handle_rule_command(name[1:], rest, cfg)
+        _handle_rule_command(name[1:], rest, cfg, session)
         return False
     if name == "/mode":
-        _handle_mode_command(rest, cfg)
+        _handle_mode_command(rest, cfg, session)
         return False
 
     print(f"Unknown command: {name}. Try /help.")
@@ -142,7 +142,8 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
     return False
 
 
-def _handle_rule_command(behavior: str, text: str, cfg: Config) -> None:
+def _handle_rule_command(behavior: str, text: str, cfg: Config,
+                         session: AgentSession) -> None:
     raw, destination = _split_destination(text)
     if not raw:
         print(f"Usage: /{behavior} <rule> [local|project]")
@@ -154,22 +155,26 @@ def _handle_rule_command(behavior: str, text: str, cfg: Config) -> None:
     except ValueError as e:
         print(f"Invalid rule: {e}")
         return
-    context = apply_permission_update(
-        load_permission_context(cfg.workdir, _mode_override(cfg)), update)
+    base_context = session.permission_context or load_permission_context(
+        cfg.workdir, _mode_override(cfg))
+    context = apply_permission_update(base_context, update)
+    session.permission_context = context
     if destination in {"local", "project"}:
         persist_permission_updates(cfg.workdir, (update,))
     print(summarize_permission_update(update))
     print(format_permission_context(context))
 
 
-def _handle_mode_command(text: str, cfg: Config) -> None:
+def _handle_mode_command(text: str, cfg: Config, session: AgentSession) -> None:
     raw, destination = _split_destination(text)
     if raw not in PERMISSION_MODES:
         print("Usage: /mode <default|plan|acceptEdits|bypass|dontAsk> [local|project]")
         return
     update = PermissionUpdate("setMode", destination, mode=raw)
-    context = apply_permission_update(
-        load_permission_context(cfg.workdir, _mode_override(cfg)), update)
+    base_context = session.permission_context or load_permission_context(
+        cfg.workdir, _mode_override(cfg))
+    context = apply_permission_update(base_context, update)
+    session.permission_context = context
     cfg.permission_mode = raw
     if destination in {"local", "project"}:
         persist_permission_updates(cfg.workdir, (update,))

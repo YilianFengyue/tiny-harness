@@ -55,3 +55,27 @@ def test_session_captures_live_loop_events_and_trajectory(make_cfg):
     assert any(e["type"] == "turn_start" for e in events)
     assert any(e["type"] == "transition" and e["reason"] == "next_turn"
                for e in events)
+
+
+def test_session_permission_context_survives_between_submits(make_cfg):
+    cfg = make_cfg()
+    command = '{"command": "python -c \\"print(1)\\""}'
+    provider = MockProvider([
+        turn(calls=[("c1", "bash", command)]),
+        turn(content="first"),
+        turn(calls=[("c2", "bash", command)]),
+        turn(content="second"),
+    ])
+    session = AgentSession.fresh(cfg, provider)
+    session.permission_resolver = lambda *_args: "s"
+
+    first = session.submit("Run the probe once.")
+    second = session.submit("Run the same probe again.")
+
+    assert any(e["type"] == "tool_permission_resolved"
+               and e["resolver"] == "tui" for e in first.events)
+    assert any(e["type"] == "tool_permission_update"
+               and not e["persisted"] for e in first.events)
+    assert any(e["type"] == "tool_permission"
+               and e["reason_type"] == "rule" for e in second.events)
+    assert not any(e["type"] == "tool_permission_wait" for e in second.events)

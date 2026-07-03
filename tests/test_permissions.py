@@ -256,3 +256,24 @@ def test_interactive_session_allow_updates_memory_context(make_cfg, monkeypatch,
                for e in events)
     assert second.allowed
     assert second.reason_type == "rule"
+
+
+def test_permission_resolver_hook_updates_memory_context(make_cfg, tmp_path):
+    workdir = tmp_path / "ws"
+    workdir.mkdir()
+    cfg = make_cfg(workdir=workdir)
+    ctx = ToolContext(workdir=workdir)
+    ctx.runtime.permission_resolver = lambda *_args: "s"
+    decision = evaluate_tool_permission("bash", {"command": "python check.py"}, cfg, ctx)
+
+    final, events = resolve_permission_decision(
+        "bash", {"command": "python check.py"}, cfg, ctx, decision)
+    second = evaluate_tool_permission("bash", {"command": "python check.py"}, cfg, ctx)
+
+    assert final.allowed
+    assert any(e["type"] == "tool_permission_resolved"
+               and e["resolver"] == "tui" for e in events)
+    assert any(e["type"] == "tool_permission_update"
+               and not e["persisted"] for e in events)
+    assert second.allowed
+    assert second.reason_type == "rule"

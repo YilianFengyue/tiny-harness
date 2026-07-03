@@ -45,6 +45,8 @@ class AgentSession:
     cost_usd: float = 0.0
     pricing_unknown: bool = False
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
+    permission_resolver: Callable | None = None
+    permission_context: object | None = None
 
     @classmethod
     def fresh(cls, cfg: Config, provider: Provider) -> "AgentSession":
@@ -77,6 +79,8 @@ class AgentSession:
                             self.cfg.tool_result_budget_chars)
         tool_ctx = ToolContext(self.cfg.workdir, self.cfg.bash_timeout,
                                self.cfg.tool_output_limit)
+        tool_ctx.runtime.permission_context = self.permission_context
+        tool_ctx.runtime.permission_resolver = self.permission_resolver
         schemas = openai_tool_schemas()
         logger = RunLogger(self.cfg.runs_dir)
         self.last_run_id = logger.run_id
@@ -107,6 +111,7 @@ class AgentSession:
         self.usage_total.add(_usage_from_dict(summary["usage_total"]))
         self.cost_usd += float(summary["cost_usd"])
         self.pricing_unknown = self.pricing_unknown or bool(summary["pricing_unknown"])
+        self.permission_context = tool_ctx.runtime.permission_context
         return SessionTurn(run_id=logger.run_id, summary=summary, events=events)
 
     def cancel_current(self) -> None:

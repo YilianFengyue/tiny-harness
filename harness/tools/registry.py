@@ -22,6 +22,7 @@ from ..cancel import CancellationToken, CancelledError
 ProgressCallback = Callable[[dict], None]
 ContextModifier = Callable[["ToolRuntimeState"], dict | None]
 ToolValidator = Callable[["ToolContext", dict], None]
+PermissionResolver = Callable[[str, dict, object, object, "ToolContext"], str]
 
 
 @dataclass
@@ -36,6 +37,7 @@ class ToolRuntimeState:
     file_history: list[dict] = field(default_factory=list)
     persisted_results: dict[str, str] = field(default_factory=dict)
     permission_context: object | None = None
+    permission_resolver: PermissionResolver | None = None
 
 
 @dataclass

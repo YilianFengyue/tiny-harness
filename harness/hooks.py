@@ -112,6 +112,26 @@ def resolve_permission_decision(name: str, arguments: dict, cfg: Config,
         "suggestions": list(decision.suggestions),
     }]
 
+    resolver_fn = getattr(tool_ctx.runtime, "permission_resolver", None) if tool_ctx else None
+    if callable(resolver_fn):
+        resolver = ResolveOnce()
+        try:
+            choice = resolver_fn(name, arguments, decision, cfg, tool_ctx)
+            resolver.claim("tui", choice)
+        except Exception as e:
+            resolver.claim("tui", f"deny:{e}")
+        claimed = str(resolver.value or "deny")
+        final, update = _decision_from_choice(claimed, name, arguments, decision, cfg, tool_ctx)
+        if update:
+            events.append({"type": "tool_permission_update",
+                           "persisted": update.destination in {"local", "project"},
+                           "summary": summarize_permission_update(update),
+                           "destination": update.destination,
+                           "behavior": update.behavior,
+                           "mode": update.mode})
+        events.append(_resolved_event(final, resolver.claimed_by or "unknown"))
+        return final, events
+
     if decision.mode == "dontAsk" or not sys.stdin.isatty():
         final = PermissionDecision(
             "deny", decision.message, reason_type=decision.reason_type,

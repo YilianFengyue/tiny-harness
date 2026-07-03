@@ -20,7 +20,6 @@ from harness.config import Config, PROJECT_ROOT
 from harness.loop import build_resume_messages, run_agent
 from harness.providers import OpenAIChatProvider, ReplayProvider
 from harness.telemetry import RunLogger, read_trajectory
-from harness.tui import run_tui
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -49,6 +48,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--permission-mode", default="default",
                    choices=["default", "plan", "acceptEdits", "bypass", "dontAsk"],
                    help="权限模式：default/plan/acceptEdits/bypass/dontAsk")
+    p.add_argument("--tui", default="textual", choices=["textual", "simple"],
+                   help="chat 前端：textual=Rich/Textual GUI，simple=无依赖 REPL")
     return p.parse_args(argv)
 
 
@@ -97,7 +98,11 @@ def main(argv: list[str] | None = None) -> int:
             model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url,
             max_retries=cfg.max_retries, reasoning_effort=cfg.reasoning_effort,
             max_completion_tokens=cfg.max_completion_tokens)
-        return run_tui(cfg, provider, resume_run_id=args.resume)
+        if args.tui == "simple":
+            from harness.tui import run_tui
+            return run_tui(cfg, provider, resume_run_id=args.resume)
+        from harness.tui_textual import run_textual_tui
+        return run_textual_tui(cfg, provider, resume_run_id=args.resume)
 
     args = parse_args(argv)
     overrides: dict = {
