@@ -13,9 +13,16 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Literal, Mapping
 
+from .settings import (
+    SettingsSnapshot,
+    load_settings,
+    nested_get,
+    settings_for_source,
+)
+
 PermissionBehavior = Literal["allow", "deny", "ask", "passthrough"]
 PermissionMode = Literal["default", "plan", "acceptEdits", "bypass", "dontAsk"]
-PermissionSource = Literal["project", "local", "session", "cli", "policy"]
+PermissionSource = Literal["user", "project", "local", "session", "cli", "policy"]
 PermissionUpdateKind = Literal["addRules", "replaceRules", "removeRules", "setMode"]
 PERMISSION_MODES: tuple[PermissionMode, ...] = (
     "default", "plan", "acceptEdits", "bypass", "dontAsk")
@@ -265,23 +272,41 @@ def find_matching_rule(context: PermissionContext, behavior: PermissionBehavior,
 def load_permission_context(workdir: Path, mode_override: str | None = None,
                             cli_allow: Iterable[str] = (),
                             cli_deny: Iterable[str] = (),
-                            cli_ask: Iterable[str] = ()) -> PermissionContext:
+                            cli_ask: Iterable[str] = (),
+                            settings_snapshot: SettingsSnapshot | None = None) -> PermissionContext:
     rules: list[PermissionRule] = []
     mode: PermissionMode = "default"
-    for source, path in (
-        ("project", workdir / ".tiny-harness" / "settings.json"),
-        ("local", workdir / ".tiny-harness" / "settings.local.json"),
-    ):
-        data = _read_settings(path)
+    snapshot = settings_snapshot or load_settings(workdir)
+    effective_permissions = snapshot.effective.get("permissions", {})
+    if isinstance(effective_permissions, Mapping):
+        loaded_mode = effective_permissions.get(
+            "mode", effective_permissions.get("defaultMode"))
+        if loaded_mode in PERMISSION_MODES:
+            mode = loaded_mode
+
+    managed_only = bool(nested_get(
+        settings_for_source(snapshot, "policySettings"),
+        "allowManagedPermissionRulesOnly",
+        False,
+    ))
+    source_pairs = (
+        ("userSettings", "user"),
+        ("projectSettings", "project"),
+        ("localSettings", "local"),
+        ("flagSettings", "cli"),
+        ("policySettings", "policy"),
+    )
+    for setting_source, permission_source in source_pairs:
+        if managed_only and setting_source != "policySettings":
+            continue
+        data = settings_for_source(snapshot, setting_source)  # type: ignore[arg-type]
         permissions = data.get("permissions", {}) if isinstance(data, dict) else {}
-        if isinstance(permissions, dict):
-            loaded_mode = permissions.get("mode")
-            if loaded_mode in PERMISSION_MODES:
-                mode = loaded_mode
-            rules.extend(_rules_from_settings(source, permissions))
-    rules.extend(_cli_rules("cli", "allow", cli_allow))
-    rules.extend(_cli_rules("cli", "deny", cli_deny))
-    rules.extend(_cli_rules("cli", "ask", cli_ask))
+        if isinstance(permissions, Mapping):
+            rules.extend(_rules_from_settings(permission_source, permissions))
+    if not managed_only:
+        rules.extend(_cli_rules("cli", "allow", cli_allow))
+        rules.extend(_cli_rules("cli", "deny", cli_deny))
+        rules.extend(_cli_rules("cli", "ask", cli_ask))
     if mode_override:
         mode = _coerce_mode(mode_override)
     return PermissionContext(mode=mode, rules=tuple(rules))

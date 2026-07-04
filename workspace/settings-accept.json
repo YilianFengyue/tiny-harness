@@ -1,0 +1,7 @@
+﻿{
+  "model": "gpt-5.5",
+  "max_turns": 6,
+  "permissions": {
+    "mode": "plan"
+  }
+}

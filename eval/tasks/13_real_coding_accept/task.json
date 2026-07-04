@@ -1,0 +1,6 @@
+{
+  "prompt": "真实开发修复任务：请阅读 README.md 和 tests，定位 invoice 包里的失败原因，用 grep/glob_files/read_file/edit_file 精确修复源码，运行 python -m pytest 验证。完成后写 ACCEPTANCE.md，总结改了哪些文件、为什么、测试结果。不要改测试，不要用 write_file 覆写 src/invoice/*.py。",
+  "max_turns": 22,
+  "yolo": false,
+  "_note": "CH05 ProMax 真实 coding agent 验收：settings/features 可审计，流程必须像 coding agent。"
+}

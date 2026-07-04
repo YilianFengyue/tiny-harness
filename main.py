@@ -27,25 +27,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("task", nargs="?", help="任务描述（--replay 时可省略）")
     p.add_argument("--model", default=None)
     p.add_argument("--workdir", default=None, help="agent 的沙箱工作目录（默认 ./workspace）")
-    p.add_argument("--max-turns", type=int, default=30)
-    p.add_argument("--max-cost", type=float, default=1.0, help="美元成本熔断线")
+    p.add_argument("--max-turns", type=int, default=None)
+    p.add_argument("--max-cost", type=float, default=None, help="美元成本熔断线")
     p.add_argument("--reasoning-effort", default=None,
                    choices=["none", "low", "medium", "high", "xhigh"])
     p.add_argument("--max-completion-tokens", type=int, default=None)
-    p.add_argument("--context-budget", type=int, default=240_000,
+    p.add_argument("--context-budget", type=int, default=None,
                    help="input token 预算，超过触发工具结果清理")
-    p.add_argument("--context-hard-limit", type=int, default=300_000,
+    p.add_argument("--context-hard-limit", type=int, default=None,
                    help="本地估算或上轮真实 input 超过后阻断")
-    p.add_argument("--keep-recent", type=int, default=3, help="清理时保留最近 N 条工具结果")
-    p.add_argument("--tool-result-budget-chars", type=int, default=16_000,
+    p.add_argument("--keep-recent", type=int, default=None, help="清理时保留最近 N 条工具结果")
+    p.add_argument("--tool-result-budget-chars", type=int, default=None,
                    help="单条工具结果进入下一轮前的字符预算")
-    p.add_argument("--skill", action="append", default=[],
+    p.add_argument("--skill", action="append", default=None,
                    help="注入领域 skill（名字或路径），可重复")
     p.add_argument("--replay", metavar="RUN_ID", help="离线重放该 run 的模型响应")
     p.add_argument("--resume", metavar="RUN_ID", help="从该 run 的消息现场继续")
     p.add_argument("--runs-dir", default=None)
-    p.add_argument("--yolo", action="store_true", help="跳过危险命令确认（eval 自动化用）")
-    p.add_argument("--permission-mode", default="default",
+    p.add_argument("--settings", default=None,
+                   help="一次性 settings JSON 文件，优先级高于 project/local/user")
+    p.add_argument("--setting-sources", default=None,
+                   help="逗号分隔启用源：plugin,user,project,local,flag,policy")
+    p.add_argument("--yolo", action="store_true", default=None,
+                   help="跳过危险命令确认（eval 自动化用）")
+    p.add_argument("--permission-mode", default=None,
                    choices=["default", "plan", "acceptEdits", "bypass", "dontAsk"],
                    help="权限模式：default/plan/acceptEdits/bypass/dontAsk")
     p.add_argument("--tui", default="textual", choices=["textual", "simple"],
@@ -72,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if argv and argv[0] == "chat":
         args = parse_args(argv[1:])
-        overrides: dict = {
+        overrides: dict = _clean_overrides({
             "max_turns": args.max_turns, "max_cost_usd": args.max_cost,
             "context_budget": args.context_budget,
             "context_hard_limit": args.context_hard_limit,
@@ -83,7 +88,9 @@ def main(argv: list[str] | None = None) -> int:
             "skills": args.skill,
             "yolo": args.yolo,
             "permission_mode": args.permission_mode,
-        }
+            "settings_path": args.settings,
+            "setting_sources": args.setting_sources,
+        })
         if args.model:
             overrides["model"] = args.model
         if args.workdir:
@@ -105,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_textual_tui(cfg, provider, resume_run_id=args.resume)
 
     args = parse_args(argv)
-    overrides: dict = {
+    overrides: dict = _clean_overrides({
         "max_turns": args.max_turns, "max_cost_usd": args.max_cost,
         "context_budget": args.context_budget,
         "context_hard_limit": args.context_hard_limit,
@@ -115,7 +122,9 @@ def main(argv: list[str] | None = None) -> int:
         "max_completion_tokens": args.max_completion_tokens,
         "skills": args.skill, "yolo": args.yolo,
         "permission_mode": args.permission_mode,
-    }
+        "settings_path": args.settings,
+        "setting_sources": args.setting_sources,
+    })
     if args.model:
         overrides["model"] = args.model
     if args.workdir:
@@ -168,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"可视化: python main.py serve  → http://localhost:8765/viewer/index.html"
           f"?file=/runs/{summary['run_id']}/trajectory.jsonl")
     return 0 if summary["reason"] in ("completed",) else 1
+
+
+def _clean_overrides(values: dict) -> dict:
+    return {k: v for k, v in values.items() if v is not None}
 
 
 if __name__ == "__main__":

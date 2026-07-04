@@ -177,6 +177,57 @@ def test_settings_json_allows_utf8_bom_from_powershell(make_cfg, tmp_path):
     assert asked.behavior == "ask" and asked.rule == "Bash(python -c *)"
 
 
+def test_user_settings_rules_are_loaded(make_cfg, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("TINY_HARNESS_CONFIG_HOME", str(home))
+    (home / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(python *)"]}
+    }), encoding="utf-8")
+    workdir = tmp_path / "ws"
+    workdir.mkdir()
+    cfg = make_cfg(workdir=workdir)
+    decision = evaluate_tool_permission("bash", {"command": "python check.py"},
+                                        cfg, ToolContext(workdir=workdir))
+
+    assert decision.allowed
+    assert decision.rule == "Bash(python *)"
+    assert decision.source == "user"
+
+
+def test_managed_permission_rules_only_filters_user_project_local_and_cli(make_cfg, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    managed = tmp_path / "managed"
+    workdir = tmp_path / "ws"
+    (workdir / ".tiny-harness").mkdir(parents=True)
+    home.mkdir()
+    managed.mkdir()
+    monkeypatch.setenv("TINY_HARNESS_CONFIG_HOME", str(home))
+    monkeypatch.setenv("TINY_HARNESS_MANAGED_SETTINGS_PATH", str(managed))
+    (home / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(node *)"]}
+    }), encoding="utf-8")
+    (workdir / ".tiny-harness" / "settings.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(python *)"]}
+    }), encoding="utf-8")
+    (workdir / ".tiny-harness" / "settings.local.json").write_text(json.dumps({
+        "permissions": {"allow": ["Bash(git *)"]}
+    }), encoding="utf-8")
+    (managed / "managed-settings.json").write_text(json.dumps({
+        "allowManagedPermissionRulesOnly": True,
+        "permissions": {"deny": ["Bash(python *)"]}
+    }), encoding="utf-8")
+
+    context = load_permission_context(
+        workdir,
+        cli_allow=["Bash(rg *)"],
+    )
+
+    assert [(r.source, r.behavior, r.value.rule_content) for r in context.rules] == [
+        ("policy", "deny", "python *")
+    ]
+
+
 def test_passthrough_becomes_denied_ask_in_noninteractive_loop(make_cfg, make_logger):
     provider = MockProvider([
         turn(calls=[("c1", "write_file", '{"path": "note.txt", "content": "hello"}')]),

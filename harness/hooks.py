@@ -231,11 +231,15 @@ def _resolved_event(decision: PermissionDecision, resolver: str) -> dict:
 
 def _permission_context(cfg: Config, tool_ctx: ToolContext | None) -> PermissionContext:
     if tool_ctx is None:
-        return load_permission_context(cfg.workdir, _mode_override(cfg))
+        return load_permission_context(
+            cfg.workdir, _mode_override(cfg),
+            settings_snapshot=cfg.settings_snapshot)
     cached = tool_ctx.runtime.permission_context
     if isinstance(cached, PermissionContext):
         return cached
-    context = load_permission_context(cfg.workdir, _mode_override(cfg))
+    context = load_permission_context(
+        cfg.workdir, _mode_override(cfg),
+        settings_snapshot=cfg.settings_snapshot)
     tool_ctx.runtime.permission_context = context
     return context
 

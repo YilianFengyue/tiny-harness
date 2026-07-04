@@ -83,6 +83,14 @@ def test_tui_slash_menu_filters_commands():
     assert matches[0][0].startswith("/permissions")
 
 
+def test_tui_slash_menu_includes_settings_and_features():
+    settings = _command_matches("/set")
+    features = _command_matches("/fea")
+
+    assert settings and settings[0][0].startswith("/settings")
+    assert features and features[0][0].startswith("/features")
+
+
 def test_build_activity_collects_thinking_and_tool_refs():
     build = BuildActivity("build-1-1", model="gpt-test")
     build.thinking += "I should inspect the workspace."

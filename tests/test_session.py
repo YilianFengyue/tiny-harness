@@ -2,6 +2,7 @@ from conftest import MockProvider, turn
 
 from harness.session import AgentSession
 from harness.telemetry import read_trajectory
+import json
 
 
 def test_session_preserves_history_across_submits(make_cfg):
@@ -55,6 +56,29 @@ def test_session_captures_live_loop_events_and_trajectory(make_cfg):
     assert any(e["type"] == "turn_start" for e in events)
     assert any(e["type"] == "transition" and e["reason"] == "next_turn"
                for e in events)
+
+
+def test_session_app_state_and_run_start_include_settings_features(make_cfg, tmp_path):
+    workdir = tmp_path / "ws"
+    settings = workdir / ".tiny-harness" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({
+        "features": {"coding_acceptance_trace": True}
+    }), encoding="utf-8")
+    cfg = make_cfg(workdir=workdir)
+    cfg = cfg.from_env(workdir=workdir, runs_dir=cfg.runs_dir)
+    provider = MockProvider([turn(content="ok")])
+    session = AgentSession.fresh(cfg, provider)
+
+    result = session.submit("Say ok.")
+
+    state = session.app_state.get_state()
+    assert state.status == "completed"
+    assert state.features["coding_acceptance_trace"] is True
+    events = read_trajectory(cfg.runs_dir, result.run_id)
+    start = events[0]
+    assert start["settings_sources"][0]["source"] == "projectSettings"
+    assert start["features"]["coding_acceptance_trace"] is True
 
 
 def test_session_permission_context_survives_between_submits(make_cfg):

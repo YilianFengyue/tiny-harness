@@ -17,6 +17,7 @@ from .permissions import (
 )
 from .providers.base import Provider
 from .session import AgentSession
+from .settings_view import format_features, format_settings_summary, settings_status_line
 
 
 def run_tui(cfg: Config, provider: Provider, resume_run_id: str | None = None) -> int:
@@ -72,10 +73,11 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> No
     print(f"model:      {cfg.model}")
     print(f"workdir:    {cfg.workdir}")
     print(f"runs_dir:   {cfg.runs_dir}")
+    print(f"settings:   {settings_status_line(cfg)}")
     if resume_run_id:
         print(f"resumed:    {resume_run_id}")
     print("-" * 64)
-    print("Commands: /help  /cost  /trace  /runs  /permissions  /exit")
+    print("Commands: /help  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
     print("=" * 64)
 
 
@@ -89,6 +91,8 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print("  /cost   Show cumulative session token/cost totals")
         print("  /trace  Print latest trajectory path and viewer URL")
         print("  /runs   List recent run ids in this runs directory")
+        print("  /settings [sources|effective|trust]  Show config snapshot")
+        print("  /features  Show active feature flags")
         print("  /permissions  Show active permission mode/rules")
         print("  /allow <rule> [local|project]  Add allow rule")
         print("  /deny <rule> [local|project]   Add deny rule")
@@ -125,8 +129,16 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
             mark = " *" if p.name == session.last_run_id else "  "
             print(f"{mark} {p.name}")
         return False
+    if name == "/settings":
+        print(format_settings_summary(cfg, rest))
+        return False
+    if name == "/features":
+        print(format_features(cfg))
+        return False
     if name == "/permissions":
-        context = load_permission_context(cfg.workdir, _mode_override(cfg))
+        context = load_permission_context(
+            cfg.workdir, _mode_override(cfg),
+            settings_snapshot=cfg.settings_snapshot)
         print(format_permission_context(context))
         return False
     if name in ("/allow", "/deny", "/ask"):
@@ -156,7 +168,8 @@ def _handle_rule_command(behavior: str, text: str, cfg: Config,
         print(f"Invalid rule: {e}")
         return
     base_context = session.permission_context or load_permission_context(
-        cfg.workdir, _mode_override(cfg))
+        cfg.workdir, _mode_override(cfg),
+        settings_snapshot=cfg.settings_snapshot)
     context = apply_permission_update(base_context, update)
     session.permission_context = context
     if destination in {"local", "project"}:
@@ -172,7 +185,8 @@ def _handle_mode_command(text: str, cfg: Config, session: AgentSession) -> None:
         return
     update = PermissionUpdate("setMode", destination, mode=raw)
     base_context = session.permission_context or load_permission_context(
-        cfg.workdir, _mode_override(cfg))
+        cfg.workdir, _mode_override(cfg),
+        settings_snapshot=cfg.settings_snapshot)
     context = apply_permission_update(base_context, update)
     session.permission_context = context
     cfg.permission_mode = raw

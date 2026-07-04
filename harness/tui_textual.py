@@ -28,6 +28,12 @@ from .permissions import (
 )
 from .providers.base import Provider
 from .session import AgentSession
+from .settings_view import (
+    format_features,
+    format_settings_summary,
+    managed_permission_rules_only,
+    settings_status_line,
+)
 
 try:  # pragma: no cover - UI smoke-tested with Textual's headless runner.
     from rich.console import Group
@@ -134,6 +140,7 @@ class PermissionPromptState:
     arguments: dict
     decision: Any
     result: "queue.Queue[str]"
+    cfg: Config | None = None
     selected: int = 0
     choice: str | None = None
 
@@ -150,6 +157,8 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/trace", "show latest trajectory path and viewer URL"),
     ("/build <n>", "open details for a build block"),
     ("/runs", "list recent run ids"),
+    ("/settings [sources|effective|trust]", "show config snapshot"),
+    ("/features", "show active feature flags"),
     ("/permissions", "show active permission mode and rules"),
     ("/allow <rule> [session|local|project]", "add an allow rule"),
     ("/deny <rule> [session|local|project]", "add a deny rule"),
@@ -984,7 +993,7 @@ if _TUI_IMPORT_ERROR is None:
         def _make_permission_resolver(self, sid: int) -> Callable:
             def resolver(name: str, arguments: dict, decision: Any, cfg: Config, tool_ctx: Any) -> str:
                 result: queue.Queue[str] = queue.Queue(maxsize=1)
-                prompt = PermissionPromptState(name, arguments or {}, decision, result)
+                prompt = PermissionPromptState(name, arguments or {}, decision, result, cfg)
                 self.call_from_thread(self._open_permission_prompt, sid, prompt)
                 return result.get()
             return resolver
@@ -1065,8 +1074,16 @@ if _TUI_IMPORT_ERROR is None:
             if name == "/runs":
                 self._add_system(_format_runs(self.cfg.runs_dir, self._current().agent.last_run_id))
                 return
+            if name == "/settings":
+                self._add_system(format_settings_summary(self.cfg, rest))
+                return
+            if name == "/features":
+                self._add_system(format_features(self.cfg))
+                return
             if name == "/permissions":
-                context = load_permission_context(self.cfg.workdir, _mode_override(self.cfg))
+                context = load_permission_context(
+                    self.cfg.workdir, _mode_override(self.cfg),
+                    settings_snapshot=self.cfg.settings_snapshot)
                 self._add_system(format_permission_context(context))
                 return
             if name in {"/allow", "/deny", "/ask"}:
@@ -1147,7 +1164,8 @@ if _TUI_IMPORT_ERROR is None:
                 return
             current = self._current()
             base_context = current.agent.permission_context or load_permission_context(
-                self.cfg.workdir, _mode_override(self.cfg))
+                self.cfg.workdir, _mode_override(self.cfg),
+                settings_snapshot=self.cfg.settings_snapshot)
             context = apply_permission_update(base_context, update)
             current.agent.permission_context = context
             current.agent.permission_resolver = self._make_permission_resolver(current.id)
@@ -1163,7 +1181,8 @@ if _TUI_IMPORT_ERROR is None:
             update = PermissionUpdate("setMode", destination, mode=raw)
             current = self._current()
             base_context = current.agent.permission_context or load_permission_context(
-                self.cfg.workdir, _mode_override(self.cfg))
+                self.cfg.workdir, _mode_override(self.cfg),
+                settings_snapshot=self.cfg.settings_snapshot)
             context = apply_permission_update(base_context, update)
             current.agent.permission_context = context
             self.cfg.permission_mode = raw
@@ -1387,6 +1406,13 @@ def _render_permission_prompt_body(prompt: PermissionPromptState) -> Text:
     text.append(mode, style="dim")
     text.append("\nReason  ", style="bold yellow")
     text.append(_compact(_one_line(reason), 180), style="dim")
+    try:
+        if prompt.cfg is not None and managed_permission_rules_only(prompt.cfg):
+            text.append("\nPolicy  ", style="bold red")
+            text.append("managed permission rules only; local/session choices may not persist for future calls",
+                        style="red")
+    except Exception:
+        pass
     return text
 
 
@@ -1432,6 +1458,12 @@ def _render_permission_request(prompt: PermissionPromptState) -> Text:
     text.append("\n| ", style=accent)
     text.append("rule: ", style="dim")
     text.append(_compact(_one_line(rule), 160), style="dim")
+    try:
+        if prompt.cfg is not None and managed_permission_rules_only(prompt.cfg):
+            text.append("\n| ", style=accent)
+            text.append("policy: managed permission rules only", style="red")
+    except Exception:
+        pass
     if answered:
         text.append("\n| \n| ", style=accent)
         text.append("selected: ", style="dim")
@@ -1765,7 +1797,8 @@ def _footer_line(ui: UiSession, cfg: Config) -> str:
     tokens = ui.agent.usage_total.as_dict()
     total_tokens = sum(int(v) for v in tokens.values())
     return (
-        f"{left}    {total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
+        f"{left} | {settings_status_line(cfg)}    "
+        f"{total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
         "ctrl+p commands | enter send | ctrl+j newline"
     )
 

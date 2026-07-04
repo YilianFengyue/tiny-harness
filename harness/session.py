@@ -20,6 +20,7 @@ from .loop import (
     build_resume_messages,
 )
 from .providers.base import Provider
+from .state import AppState, Store, build_app_state, create_store
 from .telemetry import CostLedger, RunLogger, Usage, new_run_id, read_trajectory
 from .tools import ToolContext, openai_tool_schemas
 
@@ -47,6 +48,12 @@ class AgentSession:
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     permission_resolver: Callable | None = None
     permission_context: object | None = None
+    app_state: Store[AppState] | None = None
+
+    def __post_init__(self) -> None:
+        if self.app_state is None:
+            self.app_state = create_store(build_app_state(
+                self.cfg, permission_context=self.permission_context))
 
     @classmethod
     def fresh(cls, cfg: Config, provider: Provider) -> "AgentSession":
@@ -72,6 +79,7 @@ class AgentSession:
         """Run one user message inside this persistent session."""
         self.turns_submitted += 1
         self.messages.append({"role": "user", "content": user_text})
+        self._set_status("running")
 
         ledger = CostLedger(load_pricing())
         cm = ContextManager(self.cfg.context_budget, self.cfg.context_keep_recent,
@@ -112,10 +120,12 @@ class AgentSession:
         self.cost_usd += float(summary["cost_usd"])
         self.pricing_unknown = self.pricing_unknown or bool(summary["pricing_unknown"])
         self.permission_context = tool_ctx.runtime.permission_context
+        self._refresh_app_state(status=summary["reason"])
         return SessionTurn(run_id=logger.run_id, summary=summary, events=events)
 
     def cancel_current(self) -> None:
         self.cancel_token.cancel()
+        self._set_status("cancelled")
 
     def trajectory_path(self) -> Path | None:
         if not self.last_run_id:
@@ -131,6 +141,17 @@ class AgentSession:
             "cost_usd": round(self.cost_usd, 6),
             "pricing_unknown": self.pricing_unknown,
         }
+
+    def _set_status(self, status: str) -> None:
+        self._refresh_app_state(status=status)
+
+    def _refresh_app_state(self, status: str = "ready") -> None:
+        if self.app_state is None:
+            self.app_state = create_store(build_app_state(
+                self.cfg, permission_context=self.permission_context, status=status))
+            return
+        self.app_state.set_state(lambda _prev: build_app_state(
+            self.cfg, permission_context=self.permission_context, status=status))
 
 
 def _usage_from_dict(raw: dict) -> Usage:

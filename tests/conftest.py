@@ -60,3 +60,11 @@ def make_logger(tmp_path):
     def _make():
         return RunLogger(tmp_path / "runs")
     return _make
+
+
+@pytest.fixture(autouse=True)
+def isolate_settings_dirs(monkeypatch, tmp_path):
+    monkeypatch.setenv("TINY_HARNESS_CONFIG_HOME", str(tmp_path / "home_settings"))
+    monkeypatch.setenv("TINY_HARNESS_MANAGED_SETTINGS_PATH", str(tmp_path / "managed_settings"))
+    monkeypatch.delenv("TINY_HARNESS_POLICY_SETTINGS_JSON", raising=False)
+    monkeypatch.delenv("TINY_HARNESS_SETTING_SOURCES", raising=False)

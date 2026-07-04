@@ -8,6 +8,13 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+from .settings import (
+    SettingsSnapshot,
+    load_settings,
+    parse_setting_sources_flag,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -74,19 +81,125 @@ class Config:
     permission_mode: str = "default"   # default/plan/acceptEdits/bypass/dontAsk
     skills: list[str] = field(default_factory=list)
     runs_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "runs")
+    settings_path: Path | None = None
+    setting_sources: tuple[str, ...] | None = None
+    settings_snapshot: SettingsSnapshot | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls, **overrides) -> "Config":
         load_dotenv()
-        cfg = cls(**overrides)
-        if cfg.api_key is None:
-            cfg.api_key = os.environ.get("OPENAI_API_KEY")
-        if cfg.base_url is None:
-            cfg.base_url = os.environ.get("OPENAI_BASE_URL") or None
-        if "model" not in overrides:
-            cfg.model = os.environ.get("TINY_HARNESS_MODEL", cfg.model)
-        if "permission_mode" not in overrides:
-            cfg.permission_mode = os.environ.get("TINY_HARNESS_PERMISSION_MODE",
-                                                 cfg.permission_mode)
+        explicit = {k: v for k, v in overrides.items() if v is not None}
+        settings_path = explicit.pop("settings_path", None)
+        setting_sources_raw = explicit.pop("setting_sources", None)
+
+        seed_kwargs = {}
+        for key in ("workdir", "runs_dir"):
+            if key in explicit:
+                seed_kwargs[key] = explicit[key]
+        cfg = cls(**seed_kwargs)
         cfg.workdir = Path(cfg.workdir).resolve()
+
+        if setting_sources_raw is None:
+            setting_sources_raw = os.environ.get("TINY_HARNESS_SETTING_SOURCES")
+        setting_sources = None
+        if isinstance(setting_sources_raw, str) and setting_sources_raw.strip():
+            setting_sources = parse_setting_sources_flag(setting_sources_raw)
+        elif setting_sources_raw:
+            setting_sources = tuple(setting_sources_raw)
+
+        snapshot = load_settings(
+            cfg.workdir,
+            flag_settings_path=Path(settings_path).expanduser() if settings_path else None,
+            enabled_sources=setting_sources,
+        )
+        _apply_settings(cfg, snapshot.effective)
+        cfg.settings_snapshot = snapshot
+        cfg.settings_path = Path(settings_path).expanduser() if settings_path else None
+        cfg.setting_sources = tuple(setting_sources) if setting_sources else None
+
+        _apply_env(cfg)
+
+        for key, value in explicit.items():
+            if key in {"workdir", "runs_dir"}:
+                value = Path(value)
+            setattr(cfg, key, value)
+
+        cfg.workdir = Path(cfg.workdir).resolve()
+        cfg.runs_dir = Path(cfg.runs_dir).resolve()
         return cfg
+
+
+def _apply_settings(cfg: Config, settings: dict[str, Any]) -> None:
+    mapping = {
+        "model": "model",
+        "base_url": "base_url",
+        "api_key": "api_key",
+        "workdir": "workdir",
+        "runs_dir": "runs_dir",
+        "max_turns": "max_turns",
+        "max_cost_usd": "max_cost_usd",
+        "context_budget": "context_budget",
+        "context_keep_recent": "context_keep_recent",
+        "context_hard_limit": "context_hard_limit",
+        "tool_result_budget_chars": "tool_result_budget_chars",
+        "reasoning_effort": "reasoning_effort",
+        "max_completion_tokens": "max_completion_tokens",
+        "tool_output_limit": "tool_output_limit",
+        "bash_timeout": "bash_timeout",
+        "max_retries": "max_retries",
+        "yolo": "yolo",
+        "permission_mode": "permission_mode",
+        "skills": "skills",
+    }
+    aliases = {
+        "max_cost": "max_cost_usd",
+        "keep_recent": "context_keep_recent",
+        "permissionMode": "permission_mode",
+    }
+    for key, attr in {**mapping, **aliases}.items():
+        if key in settings:
+            _set_config_value(cfg, attr, settings[key])
+
+    permissions = settings.get("permissions")
+    if isinstance(permissions, dict):
+        mode = permissions.get("mode", permissions.get("defaultMode"))
+        if mode is not None:
+            cfg.permission_mode = str(mode)
+
+
+def _apply_env(cfg: Config) -> None:
+    cfg.api_key = os.environ.get("OPENAI_API_KEY", cfg.api_key)
+    cfg.base_url = os.environ.get("OPENAI_BASE_URL") or cfg.base_url
+    cfg.model = os.environ.get("TINY_HARNESS_MODEL", cfg.model)
+    cfg.permission_mode = os.environ.get("TINY_HARNESS_PERMISSION_MODE",
+                                         cfg.permission_mode)
+    if os.environ.get("TINY_HARNESS_MAX_TURNS"):
+        cfg.max_turns = int(os.environ["TINY_HARNESS_MAX_TURNS"])
+    if os.environ.get("TINY_HARNESS_MAX_COST"):
+        cfg.max_cost_usd = float(os.environ["TINY_HARNESS_MAX_COST"])
+
+
+def _set_config_value(cfg: Config, attr: str, value: Any) -> None:
+    if value is None or not hasattr(cfg, attr):
+        return
+    current = getattr(cfg, attr)
+    if isinstance(current, Path):
+        setattr(cfg, attr, Path(str(value)).expanduser())
+    elif isinstance(current, bool):
+        setattr(cfg, attr, _as_bool(value))
+    elif isinstance(current, int) and not isinstance(current, bool):
+        setattr(cfg, attr, int(value))
+    elif isinstance(current, float):
+        setattr(cfg, attr, float(value))
+    elif isinstance(current, list):
+        setattr(cfg, attr, list(value) if isinstance(value, list) else [str(value)])
+    else:
+        setattr(cfg, attr, value)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

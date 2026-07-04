@@ -27,6 +27,7 @@ from .hooks import (
     evaluate_tool_permission,
     resolve_permission_decision,
 )
+from .features import feature_snapshot
 from .providers.base import ModelTurn, Provider, ToolCallRequest
 from .skills import render_skills_section
 from .telemetry import CostLedger, RunLogger
@@ -132,6 +133,7 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                       messages: list[dict], session_id: str | None = None,
                       cancel_token: CancellationToken | None = None):
     state = AgentState(messages=messages)
+    settings_snapshot = cfg.settings_snapshot
     yield {
         "type": "run_start",
         "task": task,
@@ -145,6 +147,17 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
         "sdk_version": _openai_version(),
         "skills": cfg.skills,
         "session_id": session_id,
+        "settings_sources": [
+            {"source": layer.source, "path": layer.path, "origin": layer.origin}
+            for layer in settings_snapshot.sources
+        ] if settings_snapshot else [],
+        "settings_policy_origin": (
+            settings_snapshot.policy_origin if settings_snapshot else None),
+        "settings_errors": [
+            {"source": e.source, "path": e.path, "message": e.message}
+            for e in settings_snapshot.errors
+        ] if settings_snapshot else [],
+        "features": feature_snapshot(cfg),
     }
 
     try:
