@@ -38,7 +38,7 @@ try:  # pragma: no cover - UI smoke-tested with Textual's headless runner.
     from textual import events
     from textual.app import App, ComposeResult
     from textual.binding import Binding
-    from textual.containers import Vertical, VerticalScroll
+    from textual.containers import Horizontal, Vertical, VerticalScroll
     from textual.message import Message
     from textual.screen import ModalScreen
     from textual.widgets import Footer, OptionList, Static, TextArea
@@ -75,6 +75,33 @@ class ToolActivity:
 
 
 @dataclass
+class BuildActivity:
+    """One OpenCode-style running block for a user turn."""
+
+    id: str
+    model: str
+    started_at: float = field(default_factory=time.monotonic)
+    finished_at: float | None = None
+    phase: str = "thinking"
+    status: str = "thinking"
+    tool_ids: list[str] = field(default_factory=list)
+    current_tool: str | None = None
+    thinking: str = ""
+    audit: list[dict] = field(default_factory=list)
+    request_turn: int | None = None
+    run_id: str | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.finished_at is None
+
+    @property
+    def elapsed_s(self) -> float:
+        end = self.finished_at or time.monotonic()
+        return max(0.0, end - self.started_at)
+
+
+@dataclass
 class UiRecord:
     role: str
     content: str = ""
@@ -94,6 +121,11 @@ class UiSession:
     status: str = "ready"
     assistant_buffer: str = ""
     verbose: bool = False
+    current_build: BuildActivity | None = None
+    builds: list[BuildActivity] = field(default_factory=list)
+    build_seq: int = 0
+    thinking_buffer: str = ""
+    pending_permission: "PermissionPromptState | None" = None
 
 
 @dataclass
@@ -102,6 +134,8 @@ class PermissionPromptState:
     arguments: dict
     decision: Any
     result: "queue.Queue[str]"
+    selected: int = 0
+    choice: str | None = None
 
 
 COMMANDS: tuple[tuple[str, str], ...] = (
@@ -114,6 +148,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/clear", "clear visible transcript"),
     ("/cost", "show cumulative token and cost totals"),
     ("/trace", "show latest trajectory path and viewer URL"),
+    ("/build <n>", "open details for a build block"),
     ("/runs", "list recent run ids"),
     ("/permissions", "show active permission mode and rules"),
     ("/allow <rule> [session|local|project]", "add an allow rule"),
@@ -153,6 +188,15 @@ if _TUI_IMPORT_ERROR is None:
 
         ALLOW_SELECT = False
 
+        def on_click(self, event: events.Click) -> None:
+            app = self.app
+            if hasattr(app, "open_build_at_line"):
+                app.open_build_at_line(int(event.y))
+
+
+    class CommandMenuBody(Static):
+        ALLOW_SELECT = False
+
     class PromptInput(TextArea):
         """Bottom prompt: Enter sends, Ctrl+J keeps the drafting flow multiline."""
 
@@ -160,6 +204,11 @@ if _TUI_IMPORT_ERROR is None:
             def __init__(self, text: str) -> None:
                 super().__init__()
                 self.text = text
+
+        class CommandNavigate(Message):
+            def __init__(self, direction: int) -> None:
+                super().__init__()
+                self.direction = direction
 
         BINDINGS = [
             Binding("enter", "submit", "Send", show=False),
@@ -180,10 +229,36 @@ if _TUI_IMPORT_ERROR is None:
             self.text = ""
 
         async def _on_key(self, event: events.Key) -> None:
+            app = self.app
+            if hasattr(app, "has_pending_permission") and app.has_pending_permission():
+                if event.key in {"up", "shift+tab"}:
+                    event.prevent_default()
+                    event.stop()
+                    app.action_permission_prev()
+                    return
+                if event.key in {"down", "tab"}:
+                    event.prevent_default()
+                    event.stop()
+                    app.action_permission_next()
+                    return
+                if event.key == "enter":
+                    event.prevent_default()
+                    event.stop()
+                    app.action_permission_submit()
+                    return
+                if event.key == "escape":
+                    event.prevent_default()
+                    event.stop()
+                    app.action_permission_deny()
+                    return
             if event.key == "enter":
                 event.prevent_default()
                 event.stop()
                 self.action_submit()
+            elif event.key in {"up", "down"} and self.text.lstrip().startswith("/"):
+                event.prevent_default()
+                event.stop()
+                self.post_message(self.CommandNavigate(-1 if event.key == "up" else 1))
             elif event.key in {"ctrl+j", "shift+enter"}:
                 event.prevent_default()
                 event.stop()
@@ -207,27 +282,18 @@ if _TUI_IMPORT_ERROR is None:
             self.prompt = prompt
 
         def compose(self) -> ComposeResult:
-            rule = permission_rule_value_to_string(
-                suggest_permission_rule_value(self.prompt.tool, self.prompt.arguments))
-            body = Table.grid(padding=(0, 1))
-            body.add_column(style="bold yellow", no_wrap=True)
-            body.add_column()
-            body.add_row("Tool", self.prompt.tool)
-            body.add_row("Rule", rule)
-            body.add_row("Mode", str(getattr(self.prompt.decision, "mode", "default")))
-            body.add_row("Reason", str(getattr(self.prompt.decision, "message", "")))
-            body.add_row("Input", _compact(_pretty_args(self.prompt.arguments), 900))
+            body = _render_permission_prompt_body(self.prompt)
             yield Vertical(
                 Static(Panel(body, title="Permission required", border_style="yellow")),
                 OptionList(
-                    Option("Allow once", id="y"),
-                    Option("Allow this session", id="s"),
-                    Option("Allow locally", id="l"),
-                    Option("Allow in project", id="p"),
-                    Option("Deny", id="n"),
+                    Option(_permission_option("1. Allow once", "Approve this tool call only"), id="y"),
+                    Option(_permission_option("2. Allow this session", "Remember the matching rule for this session"), id="s"),
+                    Option(_permission_option("3. Allow locally", "Persist the matching rule to local settings"), id="l"),
+                    Option(_permission_option("4. Allow in project", "Persist the matching rule to project settings"), id="p"),
+                    Option(_permission_option("5. Deny", "Reject this request"), id="n"),
                     id="permission-options",
                 ),
-                Static("Esc cancel", id="modal-hint"),
+                Static("up/down select   enter submit   esc dismiss", id="modal-hint"),
                 id="permission-modal",
             )
 
@@ -290,6 +356,79 @@ if _TUI_IMPORT_ERROR is None:
                 Static(Panel(text, title="/verbose lifecycle", border_style="blue")),
                 id="verbose-modal",
             )
+
+
+    class BuildDetailScreen(ModalScreen[None]):
+        BINDINGS = [
+            Binding("escape", "app.pop_screen", "Parent", show=True),
+            Binding("left", "prev_tool", "Prev", show=True),
+            Binding("right", "next_tool", "Next", show=True),
+            Binding("pageup", "page_up", "PgUp", show=False),
+            Binding("pagedown", "page_down", "PgDn", show=False),
+        ]
+
+        def __init__(self, build: BuildActivity, activities: dict[str, ToolActivity]) -> None:
+            super().__init__()
+            self.build = build
+            self.activities = activities
+            self.tool_index = 0 if build.tool_ids else -1
+
+        def compose(self) -> ComposeResult:
+            yield Vertical(
+                Static(id="build-detail-title"),
+                Horizontal(
+                    OptionList(*_build_tool_options(self.build, self.activities),
+                               id="build-tool-list"),
+                    VerticalScroll(TranscriptBody(id="build-detail-body"),
+                                   id="build-detail-scroll"),
+                    id="build-detail-main",
+                ),
+                Static(id="build-detail-footer"),
+                id="build-detail-modal",
+            )
+
+        def on_mount(self) -> None:
+            self._refresh()
+
+        def action_prev_tool(self) -> None:
+            if self.build.tool_ids:
+                self.tool_index = (self.tool_index - 1) % len(self.build.tool_ids)
+                self._refresh()
+
+        def action_next_tool(self) -> None:
+            if self.build.tool_ids:
+                self.tool_index = (self.tool_index + 1) % len(self.build.tool_ids)
+                self._refresh()
+
+        def action_page_up(self) -> None:
+            self.query_one("#build-detail-scroll", VerticalScroll).scroll_page_up(animate=False)
+
+        def action_page_down(self) -> None:
+            self.query_one("#build-detail-scroll", VerticalScroll).scroll_page_down(animate=False)
+
+        def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+            if event.option_list.id != "build-tool-list":
+                return
+            raw = str(event.option.id or "")
+            if raw.isdigit():
+                self.tool_index = int(raw)
+                self._refresh()
+
+        def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+            if event.option_list.id != "build-tool-list":
+                return
+            raw = str(event.option.id or "")
+            if raw.isdigit():
+                self.tool_index = int(raw)
+                self._refresh()
+
+        def _refresh(self) -> None:
+            self.query_one("#build-detail-title", Static).update(
+                _render_build_detail_title(self.build))
+            self.query_one("#build-detail-body", TranscriptBody).update(
+                _render_build_detail(self.build, self.activities, self.tool_index))
+            self.query_one("#build-detail-footer", Static).update(
+                _render_build_detail_footer(self.build, self.tool_index))
 
 
     class SessionPicker(ModalScreen[int | None]):
@@ -386,8 +525,24 @@ if _TUI_IMPORT_ERROR is None:
         #prompt {
             height: 4;
             min-height: 3;
-            border: tall #30363d;
-            background: #0d1117;
+            border-left: tall #58a6ff;
+            border-top: none;
+            border-right: none;
+            border-bottom: none;
+            background: #161616;
+            padding: 0 1;
+        }
+
+        #command-menu {
+            height: auto;
+            max-height: 12;
+            padding: 0 3;
+            background: #1f1f1f;
+            border-left: tall #58a6ff;
+        }
+
+        #command-menu.hidden {
+            display: none;
         }
 
         #footerline {
@@ -407,6 +562,47 @@ if _TUI_IMPORT_ERROR is None:
             padding: 1 2;
             background: #161b22;
             border: round #30363d;
+        }
+
+        #build-detail-modal {
+            width: 94%;
+            height: 92%;
+            margin: 1 3;
+            background: #050505;
+            border: tall #30363d;
+        }
+
+        #build-detail-title {
+            height: 3;
+            padding: 1 2 0 2;
+            background: #050505;
+        }
+
+        #build-detail-main {
+            height: 1fr;
+            background: #050505;
+        }
+
+        #build-tool-list {
+            width: 38;
+            min-width: 28;
+            height: 1fr;
+            background: #0f0f0f;
+            border-left: tall #58a6ff;
+            border-right: solid #30363d;
+        }
+
+        #build-detail-scroll {
+            height: 1fr;
+            padding: 0 2;
+            background: #050505;
+        }
+
+        #build-detail-footer {
+            height: 3;
+            padding: 1 2;
+            background: #151515;
+            color: #8b949e;
         }
 
         #permission-options, #session-options, #command-options, #theme-options {
@@ -449,30 +645,54 @@ if _TUI_IMPORT_ERROR is None:
             self.sessions: dict[int, UiSession] = {}
             self.current_id = 1
             self.next_id = 1
+            self.command_selected = 0
+            self.build_click_zones: list[tuple[int, int, str]] = []
 
         def compose(self) -> ComposeResult:
             yield Static(id="topbar")
             with VerticalScroll(id="transcript"):
                 yield TranscriptBody(id="transcript-body")
             yield Static(id="statusline")
+            yield CommandMenuBody(id="command-menu", classes="hidden")
             yield PromptInput(id="prompt")
             yield Static(id="footerline")
             yield Footer()
 
         def on_mount(self) -> None:
             self._new_session(resume_run_id=self.resume_run_id)
-            self.set_interval(1.0, self._refresh_chrome)
+            self.set_interval(0.25, self._tick)
             self._refresh_all()
             self.query_one("#prompt", PromptInput).focus()
 
+        def _tick(self) -> None:
+            self._refresh_chrome()
+            ui = self._current()
+            if ui.running or (ui.current_build and ui.current_build.running):
+                self._refresh_messages()
+
+        def on_text_area_changed(self, event: PromptInput.Changed) -> None:
+            if event.text_area.id == "prompt":
+                self._refresh_command_menu(event.text_area.text)
+
+        def on_prompt_input_command_navigate(self, event: PromptInput.CommandNavigate) -> None:
+            matches = _command_matches(self.query_one("#prompt", PromptInput).text)
+            if not matches:
+                return
+            self.command_selected = (self.command_selected + event.direction) % len(matches)
+            self._refresh_command_menu(self.query_one("#prompt", PromptInput).text)
+
         def on_prompt_input_submitted(self, event: PromptInput.Submitted) -> None:
+            if self.has_pending_permission():
+                self.action_permission_submit()
+                return
             text = event.text.strip()
             if not text:
                 return
-            if text == "/":
-                self.push_screen(CommandPalette(), self._run_palette_command)
-                return
             if text.startswith("/"):
+                selected = self._selected_slash_command(text)
+                if selected and " " not in text and text != selected:
+                    text = selected
+                self._refresh_command_menu("")
                 self._handle_command(text)
                 return
             self._submit_user_text(text)
@@ -491,7 +711,26 @@ if _TUI_IMPORT_ERROR is None:
             self._drop_current_session()
 
         def action_verbose(self) -> None:
-            self.push_screen(VerboseScreen(self._current().audit_events))
+            ui = self._current()
+            build = _latest_build(ui)
+            if build:
+                self.push_screen(BuildDetailScreen(build, ui.activities))
+            else:
+                self.push_screen(VerboseScreen(ui.audit_events))
+
+        def action_open_build(self, build_id: str = "") -> None:
+            self._open_build_by_id(build_id)
+
+        def open_build_at_line(self, y: int) -> None:
+            try:
+                scroll_y = int(self.query_one("#transcript", VerticalScroll).scroll_y)
+            except Exception:
+                scroll_y = 0
+            line = y + scroll_y
+            for start, end, build_id in self.build_click_zones:
+                if start <= line <= end:
+                    self._open_build_by_id(build_id)
+                    return
 
         def action_transcript_page_up(self) -> None:
             self.query_one("#transcript", VerticalScroll).scroll_page_up(animate=False)
@@ -517,6 +756,47 @@ if _TUI_IMPORT_ERROR is None:
             else:
                 self.exit()
 
+        def has_pending_permission(self) -> bool:
+            return self._current().pending_permission is not None
+
+        def action_permission_prev(self) -> None:
+            self._move_permission_selection(-1)
+
+        def action_permission_next(self) -> None:
+            self._move_permission_selection(1)
+
+        def action_permission_submit(self) -> None:
+            ui = self._current()
+            prompt = ui.pending_permission
+            if not prompt:
+                return
+            choice = _permission_choices()[prompt.selected][0]
+            self._resolve_pending_permission(ui, choice)
+
+        def action_permission_deny(self) -> None:
+            ui = self._current()
+            if ui.pending_permission:
+                self._resolve_pending_permission(ui, "n")
+
+        def _move_permission_selection(self, delta: int) -> None:
+            ui = self._current()
+            prompt = ui.pending_permission
+            if not prompt:
+                return
+            choices = _permission_choices()
+            prompt.selected = (prompt.selected + delta) % len(choices)
+            self._refresh_all()
+
+        def _resolve_pending_permission(self, ui: UiSession, choice: str) -> None:
+            prompt = ui.pending_permission
+            if not prompt or prompt.choice is not None:
+                return
+            prompt.choice = choice
+            ui.pending_permission = None
+            ui.status = f"permission selected: {_permission_choice_label(choice)}"
+            prompt.result.put(choice)
+            self._refresh_all()
+
         def _new_session(self, resume_run_id: str | None = None) -> UiSession:
             sid = self.next_id
             self.next_id += 1
@@ -524,6 +804,7 @@ if _TUI_IMPORT_ERROR is None:
                      if resume_run_id else AgentSession.fresh(self.cfg, self.provider))
             ui = UiSession(sid, f"Session {sid}", agent)
             agent.permission_resolver = self._make_permission_resolver(sid)
+            ui.records.append(UiRecord("system", "", "logo"))
             ui.records.append(UiRecord(
                 "system",
                 f"ready  model={self.cfg.model}  cwd={self.cfg.workdir}",
@@ -565,12 +846,43 @@ if _TUI_IMPORT_ERROR is None:
             ui.running = True
             ui.status = "thinking"
             ui.assistant_buffer = ""
+            ui.thinking_buffer = ""
             ui.records.append(UiRecord("user", text))
             if ui.title.startswith("Session "):
                 ui.title = _compact(text.replace("\n", " "), 30)
             self._refresh_all()
             thread = threading.Thread(target=self._run_turn, args=(ui.id, text), daemon=True)
             thread.start()
+
+        def _start_build(self, ui: UiSession) -> BuildActivity:
+            ui.build_seq += 1
+            build = BuildActivity(f"build-{ui.id}-{ui.build_seq}", model=self.cfg.model)
+            ui.current_build = build
+            ui.builds.append(build)
+            return build
+
+        def _append_build_record(self, ui: UiSession, build: BuildActivity) -> None:
+            if not any(r.kind == "build_activity" and r.content == build.id for r in ui.records):
+                ui.records.append(UiRecord("assistant", build.id, "build_activity", {"build": build}))
+
+        def _ensure_tool_build(self, ui: UiSession) -> BuildActivity:
+            build = ui.current_build
+            if build is None or not build.running:
+                build = self._start_build(ui)
+            self._append_build_record(ui, build)
+            return build
+
+        def _finish_current_build(self, ui: UiSession, status: str = "done") -> None:
+            build = ui.current_build
+            if not build or not build.running:
+                return
+            if not build.tool_ids and not build.audit:
+                ui.current_build = None
+                return
+            build.finished_at = time.monotonic()
+            build.phase = "done"
+            build.status = status
+            ui.current_build = None
 
         def _run_turn(self, sid: int, text: str) -> None:
             ui = self.sessions[sid]
@@ -585,11 +897,19 @@ if _TUI_IMPORT_ERROR is None:
             ui = self.sessions.get(sid)
             if not ui:
                 return
-            if ui.assistant_buffer.strip():
-                ui.records.append(UiRecord("assistant", ui.assistant_buffer.strip()))
-                ui.assistant_buffer = ""
-            elif summary.get("final_message"):
+            self._flush_thinking_buffer(ui)
+            if not self._flush_assistant_buffer(ui) and summary.get("final_message"):
                 ui.records.append(UiRecord("assistant", str(summary["final_message"])))
+            final_status = str(summary.get("reason") or "done")
+            if ui.current_build:
+                ui.current_build.finished_at = time.monotonic()
+                ui.current_build.phase = "done" if summary.get("reason") == "completed" else "stopped"
+                ui.current_build.status = final_status
+                ui.current_build.run_id = str(summary.get("run_id") or "")
+                ui.current_build = None
+            for build in ui.builds:
+                if not build.run_id:
+                    build.run_id = str(summary.get("run_id") or "")
             ui.running = False
             ui.status = f"done: {summary.get('reason')} turns={summary.get('turns')}"
             self._refresh_all()
@@ -600,6 +920,11 @@ if _TUI_IMPORT_ERROR is None:
                 return
             ui.running = False
             ui.status = "error"
+            if ui.current_build:
+                ui.current_build.finished_at = time.monotonic()
+                ui.current_build.phase = "error"
+                ui.current_build.status = str(exc)
+                ui.current_build = None
             ui.records.append(UiRecord("system", f"ERROR: {exc}", "error"))
             self._refresh_all()
 
@@ -610,26 +935,44 @@ if _TUI_IMPORT_ERROR is None:
             event = dict(event)
             ui.audit_events.append(event)
             kind = event.get("type", "")
+            build = ui.current_build
             if kind == "assistant_delta":
+                reasoning = event.get("reasoning_content") or ""
+                if reasoning:
+                    ui.thinking_buffer += reasoning
+                    if build and build.running:
+                        build.thinking += reasoning
+                    ui.status = "thinking"
                 content = event.get("content") or ""
                 if content:
+                    self._finish_current_build(ui, "completed")
+                    self._flush_thinking_buffer(ui)
                     ui.assistant_buffer += content
                     ui.status = "responding"
             elif kind == "llm_response":
+                if build:
+                    build.status = str(event.get("finish_reason") or "model response")
+                    if event.get("tool_calls"):
+                        build.phase = "tools"
+                        build.status = "running tools"
                 ui.status = f"model: {event.get('finish_reason')}"
             elif kind == "turn_start":
+                if build:
+                    build.phase = "thinking"
+                    build.status = "thinking"
                 ui.status = "thinking"
             elif kind in TOOL_EVENT_TYPES:
+                self._flush_assistant_buffer(ui)
+                self._flush_thinking_buffer(ui)
+                build = self._ensure_tool_build(ui)
+                build.audit.append(event)
                 activity = _fold_tool_event(ui.activities, event)
-                if activity and not any(
-                    r.kind == "tool_activity" and r.content == activity.call_id
-                    for r in ui.records
-                ):
-                    ui.records.append(UiRecord(
-                        "tool", activity.call_id, "tool_activity",
-                        {"activity": activity},
-                    ))
                 if activity:
+                    if activity.call_id not in build.tool_ids:
+                        build.tool_ids.append(activity.call_id)
+                    build.current_tool = _tool_title(activity)
+                    build.phase = "permission" if activity.permission == "waiting" else "tools"
+                    build.status = _activity_status(activity)
                     ui.status = _activity_status(activity)
             elif kind == "context_edit":
                 ui.status = _compact(_format_context_edit(event), 90)
@@ -649,20 +992,35 @@ if _TUI_IMPORT_ERROR is None:
         def _open_permission_prompt(self, sid: int, prompt: PermissionPromptState) -> None:
             ui = self.sessions.get(sid)
             if ui:
-                call_id = f"permission:{prompt.tool}:{len(ui.audit_events)}"
-                activity = ToolActivity(call_id, prompt.tool, prompt.arguments, phase="permission")
-                activity.permission = "waiting"
-                activity.permission_reason = str(getattr(prompt.decision, "message", ""))
-                activity.permission_mode = str(getattr(prompt.decision, "mode", "default"))
-                ui.activities[call_id] = activity
-                ui.records.append(UiRecord("tool", call_id, "tool_activity", {"activity": activity}))
+                self._flush_assistant_buffer(ui)
+                self._flush_thinking_buffer(ui)
+                build = self._ensure_tool_build(ui)
+                build.current_tool = prompt.tool
+                build.phase = "permission"
+                build.status = f"waiting permission: {prompt.tool}"
+                ui.pending_permission = prompt
+                ui.records.append(UiRecord(
+                    "system",
+                    "",
+                    "permission_request",
+                    {"prompt": prompt},
+                ))
                 ui.status = f"waiting permission: {prompt.tool}"
                 self._refresh_all()
 
-            def done(choice: str | None) -> None:
-                prompt.result.put(choice or "n")
+        def _flush_assistant_buffer(self, ui: UiSession) -> bool:
+            if not ui.assistant_buffer.strip():
+                return False
+            ui.records.append(UiRecord("assistant", ui.assistant_buffer.strip()))
+            ui.assistant_buffer = ""
+            return True
 
-            self.push_screen(PermissionPrompt(prompt), done)
+        def _flush_thinking_buffer(self, ui: UiSession) -> bool:
+            if not ui.thinking_buffer.strip():
+                return False
+            ui.records.append(UiRecord("assistant", ui.thinking_buffer.strip(), "thinking"))
+            ui.thinking_buffer = ""
+            return True
 
         def _handle_command(self, command: str) -> None:
             name, _, rest = command.partition(" ")
@@ -701,6 +1059,9 @@ if _TUI_IMPORT_ERROR is None:
             if name == "/trace":
                 self._add_system(_format_trace(self._current().agent.trajectory_path()))
                 return
+            if name == "/build":
+                self._open_build_command(rest)
+                return
             if name == "/runs":
                 self._add_system(_format_runs(self.cfg.runs_dir, self._current().agent.last_run_id))
                 return
@@ -716,10 +1077,55 @@ if _TUI_IMPORT_ERROR is None:
                 return
             self._add_system(f"Unknown command: {name}. Try /help.")
 
+        def _open_build_command(self, text: str) -> None:
+            self._open_build_by_id(text.strip())
+
+        def _open_build_by_id(self, raw: str = "") -> None:
+            ui = self._current()
+            build: BuildActivity | None = None
+            if raw:
+                for candidate in ui.builds:
+                    if raw in {candidate.id, _build_number(candidate)}:
+                        build = candidate
+                        break
+            else:
+                build = _latest_build(ui)
+            if not build:
+                self._add_system("No matching build block. Try /build 1.")
+                return
+            self.push_screen(BuildDetailScreen(build, ui.activities))
+
         def _run_palette_command(self, command: str | None) -> None:
             if command:
                 self._handle_command(command)
             self.query_one("#prompt", PromptInput).focus()
+
+        def _selected_slash_command(self, text: str) -> str | None:
+            matches = _command_matches(text)
+            if not matches:
+                return None
+            self.command_selected %= len(matches)
+            return matches[self.command_selected][0].split()[0]
+
+        def _refresh_command_menu(self, text: str) -> None:
+            menu = self.query_one("#command-menu", CommandMenuBody)
+            matches = _command_matches(text)
+            if not text.lstrip().startswith("/") or not matches:
+                menu.set_class(True, "hidden")
+                self.command_selected = 0
+                menu.update("")
+                return
+            self.command_selected %= len(matches)
+            body = Table.grid(expand=True)
+            body.add_column(no_wrap=True, width=22)
+            body.add_column()
+            for index, (command, desc) in enumerate(matches[:10]):
+                cmd = command.split()[0]
+                style = "black on #ffb482" if index == self.command_selected else "white"
+                desc_style = "black on #ffb482" if index == self.command_selected else "dim"
+                body.add_row(Text(cmd, style=style), Text(desc, style=desc_style))
+            menu.update(body)
+            menu.set_class(False, "hidden")
 
         def _switch_to_session(self, sid: int | None) -> None:
             if sid in self.sessions:
@@ -789,16 +1195,25 @@ if _TUI_IMPORT_ERROR is None:
             self.query_one("#statusline", Static).update(
                 f"{_status_dot(ui)} {ui.status}  |  run={ui.agent.last_run_id or '-'}")
             self.query_one("#footerline", Static).update(
-                "Enter send | Ctrl+J newline | Ctrl+O verbose | / commands | /permissions | /trace")
+                _footer_line(ui, self.cfg))
 
         def _refresh_messages(self) -> None:
             box = self.query_one("#transcript", VerticalScroll)
             was_at_end = box.is_vertical_scroll_end or box.max_scroll_y == 0
             ui = self._current()
             renderables = []
+            self.build_click_zones = []
+            line = 0
             for record in ui.records[-120:]:
-                renderables.append(_render_record(record))
+                renderable = _render_record(record)
+                if record.kind == "build_activity":
+                    build = record.meta.get("build")
+                    if isinstance(build, BuildActivity):
+                        line_count = _renderable_line_count(renderable)
+                        self.build_click_zones.append((line, line + line_count, build.id))
+                renderables.append(renderable)
                 renderables.append(Text(""))
+                line += _renderable_line_count(renderable) + 1
             if ui.assistant_buffer.strip():
                 renderables.append(_render_record(UiRecord("assistant", ui.assistant_buffer.strip())))
             body = self.query_one("#transcript-body", TranscriptBody)
@@ -894,17 +1309,29 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
 
 
 def _render_record(record: UiRecord):
+    if record.kind == "logo":
+        return _tiny_agent_logo()
+    if record.kind == "build_activity":
+        build = record.meta.get("build")
+        if isinstance(build, BuildActivity):
+            return _render_build_activity(build)
     if record.kind == "tool_activity":
         activity = record.meta.get("activity")
         if isinstance(activity, ToolActivity):
             return _render_tool_activity(activity)
+    if record.kind == "permission_request":
+        prompt = record.meta.get("prompt")
+        if isinstance(prompt, PermissionPromptState):
+            return _render_permission_request(prompt)
+    if record.kind == "thinking":
+        return _render_thinking(record.content)
     if record.role == "user":
         text = Text()
         text.append("> ", style="bold cyan")
         text.append(record.content)
         return text
     if record.role == "assistant":
-        return Markdown(record.content)
+        return _render_assistant_markdown(record.content)
     if record.role == "system":
         text = Text()
         style = "red" if record.kind == "error" else "dim"
@@ -912,6 +1339,274 @@ def _render_record(record: UiRecord):
         text.append(record.content, style=style)
         return text
     return Text(record.content)
+
+
+def _tiny_agent_logo() -> Text:
+    text = Text()
+    # 赛博朋克风格 ASCII Art
+    lines = [
+        "████████╗██╗███╗   ██╗██╗   ██╗    █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
+        "╚══██╔══╝██║████╗  ██║╚██╗ ██╔╝   ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
+        "   ██║   ██║██╔██╗ ██║ ╚████╔╝    ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ",
+        "   ██║   ██║██║╚██╗██║  ╚██╔╝     ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ",
+        "   ██║   ██║██║ ╚████║   ██║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ",
+        "   ╚═╝   ╚═╝╚═╝  ╚═══╝   ╚═╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ",
+    ]
+    for index, line in enumerate(lines):
+        # 前3行用科技蓝，后3行用活力橙，打造上下双色渐变效果
+        style = "bold #0082ff" if index < 3 else "bold #105286"
+        text.append(line, style=style)
+        text.append("\n")
+    # 底部标语使用暗色 (dim)，不喧宾夺主
+    text.append("ProMax coding agent harness", style="dim")
+    return text
+
+
+def _render_assistant_markdown(content: str):
+    return Markdown(content)
+
+
+def _render_thinking(content: str) -> Text:
+    text = Text()
+    text.append(". Thinking: ", style="italic #6e7681")
+    text.append(_compact(_one_line(content), 900), style="italic #6e7681")
+    return text
+
+
+def _render_permission_prompt_body(prompt: PermissionPromptState) -> Text:
+    rule = permission_rule_value_to_string(
+        suggest_permission_rule_value(prompt.tool, prompt.arguments))
+    reason = str(getattr(prompt.decision, "message", "") or "permission required")
+    mode = str(getattr(prompt.decision, "mode", "default") or "default")
+    text = Text()
+    text.append("Tool  ", style="bold yellow")
+    text.append(prompt.tool, style="bold white")
+    text.append("\nRule  ", style="bold yellow")
+    text.append(_compact(_one_line(rule), 160), style="white")
+    text.append("\nMode  ", style="bold yellow")
+    text.append(mode, style="dim")
+    text.append("\nReason  ", style="bold yellow")
+    text.append(_compact(_one_line(reason), 180), style="dim")
+    return text
+
+
+def _permission_option(title: str, description: str) -> Text:
+    text = Text()
+    text.append(title, style="bold #58a6ff")
+    text.append("\n   ")
+    text.append(description, style="dim")
+    return text
+
+
+def _permission_choices() -> list[tuple[str, str, str]]:
+    return [
+        ("y", "Allow once", "Approve this tool call only"),
+        ("s", "Allow this session", "Remember the matching rule for this session"),
+        ("l", "Allow locally", "Persist the matching rule to local settings"),
+        ("p", "Allow in project", "Persist the matching rule to project settings"),
+        ("n", "Deny", "Reject this request"),
+    ]
+
+
+def _permission_choice_label(choice: str | None) -> str:
+    for item_choice, label, _description in _permission_choices():
+        if item_choice == choice:
+            return label
+    return "Deny"
+
+
+def _render_permission_request(prompt: PermissionPromptState) -> Text:
+    rule = permission_rule_value_to_string(
+        suggest_permission_rule_value(prompt.tool, prompt.arguments))
+    reason = str(getattr(prompt.decision, "message", "") or "permission required")
+    text = Text()
+    answered = prompt.choice is not None
+    base_style = "dim" if answered else "white"
+    accent = "#6e7681" if answered else "#b083f0"
+    text.append("| ", style=accent)
+    text.append("# Questions", style=f"bold {accent}")
+    text.append("\n| ", style=accent)
+    text.append(f"Permission required for {prompt.tool}", style=base_style)
+    text.append("\n| ", style=accent)
+    text.append(_compact(_one_line(reason), 180), style="dim")
+    text.append("\n| ", style=accent)
+    text.append("rule: ", style="dim")
+    text.append(_compact(_one_line(rule), 160), style="dim")
+    if answered:
+        text.append("\n| \n| ", style=accent)
+        text.append("selected: ", style="dim")
+        text.append(_permission_choice_label(prompt.choice), style="bold white" if prompt.choice != "n" else "bold red")
+        return text
+
+    text.append("\n| \n", style=accent)
+    for index, (_choice, label, description) in enumerate(_permission_choices(), start=1):
+        selected = index - 1 == prompt.selected
+        marker = ">" if selected else "|"
+        style = "bold #58a6ff" if selected else "white"
+        text.append(f"{marker} {index}. {label}", style=style)
+        text.append(f"\n|    {description}\n", style="dim")
+    text.append("| \n| tab/up/down select   enter confirm   esc dismiss", style="dim")
+    return text
+
+
+def _render_build_activity(build: BuildActivity) -> Text:
+    text = Text()
+    spinner = _spinner_frame(build) if build.running else "done"
+    text.append(f"{spinner} ", style="blue" if build.running else "green")
+    text.append("Build", style="bold white")
+    text.append(f" | {build.model}", style="dim")
+    text.append(f" | {_format_elapsed(build.elapsed_s)}", style="dim")
+    text.append(f" | {build.status}", style="dim")
+    if build.thinking.strip():
+        text.append("\n  . Thinking: ", style="italic #6e7681")
+        text.append(_compact(_one_line(build.thinking), 220), style="italic #6e7681")
+    if build.tool_ids:
+        noun = "toolcall" if len(build.tool_ids) == 1 else "toolcalls"
+        text.append(f"\n  {len(build.tool_ids)} {noun}", style="dim")
+        if build.current_tool:
+            text.append(f" | current: {_compact(build.current_tool, 140)}", style="dim")
+    if not build.running:
+        text.append(f"\n  done in {_format_elapsed(build.elapsed_s)} | details: /build {_build_number(build)}", style="dim")
+    return text
+
+
+def _render_build_detail_title(build: BuildActivity) -> Text:
+    text = Text()
+    text.append("▣ ", style="blue")
+    text.append("Build", style="bold white")
+    text.append(f" · {build.model}", style="dim")
+    text.append(f" · {_format_elapsed(build.elapsed_s)}", style="dim")
+    text.append(f" · {build.status}", style="dim")
+    if build.run_id:
+        text.append(f" · {build.run_id}", style="dim")
+    return text
+
+
+def _build_tool_options(build: BuildActivity, activities: dict[str, ToolActivity]) -> list[Option]:
+    if not build.tool_ids:
+        return [Option("No tool calls", id="-1", disabled=True)]
+    options: list[Option] = []
+    for index, call_id in enumerate(build.tool_ids):
+        activity = activities.get(call_id)
+        if not activity:
+            label = f"{index + 1:02d}. unknown"
+        else:
+            status = "ok" if activity.ok else activity.phase
+            label = f"{index + 1:02d}. {_compact(_tool_title(activity), 28)}  {status}"
+        options.append(Option(label, id=str(index)))
+    return options
+
+
+def _render_build_detail(build: BuildActivity, activities: dict[str, ToolActivity],
+                         tool_index: int = 0) -> Text:
+    text = Text()
+    text.append("Build details", style="bold cyan")
+    text.append(f"  {len(build.tool_ids)} toolcalls", style="dim")
+    text.append(f"  {_format_elapsed(build.elapsed_s)}", style="dim")
+    text.append("\n\n")
+    if build.thinking.strip():
+        text.append("Thinking\n", style="italic #b7a46a")
+        text.append(_compact(build.thinking.strip(), 3000), style="dim")
+        text.append("\n\n")
+    if not build.tool_ids:
+        text.append("No tool calls for this build.", style="dim")
+        return text
+
+    tool_index = max(0, min(tool_index, len(build.tool_ids) - 1))
+    call_id = build.tool_ids[tool_index]
+    selected = activities.get(call_id)
+
+    text.append("Selected tool\n", style="bold cyan")
+    if selected:
+        text.append(_tool_title(selected), style=f"bold {_activity_style(selected)}")
+        details = _tool_inline_details(selected)
+        if details:
+            text.append(f"  {details}", style="dim")
+        if selected.permission_reason:
+            text.append("\npermission: ", style="bold #ffad42")
+            text.append(selected.permission_reason, style="#ffad42")
+        if selected.permission_rule:
+            text.append("\nrule: ", style="bold #ffad42")
+            text.append(selected.permission_rule, style="#ffad42")
+        if selected.persisted_path:
+            text.append("\nsaved: ", style="bold cyan")
+            text.append(selected.persisted_path, style="cyan")
+        if selected.context_note:
+            text.append("\ncontextModifier: ", style="bold magenta")
+            text.append(selected.context_note, style="magenta")
+        text.append("\n")
+        if selected.arguments:
+            text.append("\ninput\n", style="bold #58a6ff")
+            text.append(_pretty_args(selected.arguments), style="dim")
+            text.append("\n")
+        if selected.result_preview:
+            text.append("\noutput\n", style="bold #58a6ff")
+            text.append(_compact(selected.result_preview, 5000),
+                        style="white" if selected.ok else "red")
+            text.append("\n")
+
+    if build.audit:
+        text.append("\nLifecycle\n", style="bold blue")
+        for event in build.audit[-40:]:
+            text.append(_format_audit_event(event), style=_audit_style(event))
+            text.append("\n")
+    return text
+
+
+def _render_build_detail_footer(build: BuildActivity, tool_index: int) -> Text:
+    text = Text()
+    count = len(build.tool_ids)
+    position = f"{tool_index + 1} of {count}" if count else "0 of 0"
+    text.append("Build ", style="bold white")
+    text.append(f"({position})", style="dim")
+    text.append(f"  {build.model}", style="dim")
+    text.append(f"  {_format_elapsed(build.elapsed_s)}", style="dim")
+    spacer = " " * 8
+    text.append(spacer)
+    text.append("Parent", style="bold white")
+    text.append(" esc   ", style="dim")
+    text.append("Prev", style="bold white")
+    text.append(" left   ", style="dim")
+    text.append("Next", style="bold white")
+    text.append(" right", style="dim")
+    return text
+
+
+def _render_build_detail_legacy(build: BuildActivity, activities: dict[str, ToolActivity]) -> Text:
+    text = Text()
+    text.append("Build", style="bold white")
+    text.append(f" | {build.model} | {_format_elapsed(build.elapsed_s)} | {build.status}\n", style="dim")
+    if build.thinking.strip():
+        text.append("\nThinking\n", style="bold #b7a46a")
+        text.append(_compact(build.thinking.strip(), 3000), style="dim")
+        text.append("\n")
+    if build.tool_ids:
+        text.append("\nTools\n", style="bold cyan")
+    for call_id in build.tool_ids:
+        activity = activities.get(call_id)
+        if not activity:
+            continue
+        text.append("\n")
+        text.append(_tool_title(activity), style=f"bold {_activity_style(activity)}")
+        details = _tool_inline_details(activity)
+        if details:
+            text.append(f"  {details}", style="dim")
+        if activity.permission_reason:
+            text.append(f"\n  permission: {activity.permission_reason}", style="yellow")
+        if activity.persisted_path:
+            text.append(f"\n  saved: {activity.persisted_path}", style="cyan")
+        if activity.context_note:
+            text.append(f"\n  contextModifier: {activity.context_note}", style="magenta")
+        if activity.result_preview:
+            text.append("\n  output: ", style="dim")
+            text.append(_compact(activity.result_preview, 1200), style="dim" if activity.ok else "red")
+        text.append("\n")
+    if build.audit:
+        text.append("\nLifecycle\n", style="bold blue")
+        for event in build.audit[-80:]:
+            text.append(_format_audit_event(event), style=_audit_style(event))
+            text.append("\n")
+    return text
 
 
 def _render_tool_activity(activity: ToolActivity) -> Text:
@@ -1005,6 +1700,74 @@ def _activity_status(activity: ToolActivity) -> str:
     if activity.permission == "waiting":
         return f"waiting permission: {activity.name}"
     return f"{activity.phase}: {activity.name}"
+
+
+def _latest_build(ui: UiSession) -> BuildActivity | None:
+    if ui.current_build:
+        return ui.current_build
+    for record in reversed(ui.records):
+        if record.kind == "build_activity":
+            build = record.meta.get("build")
+            if isinstance(build, BuildActivity):
+                return build
+    return None
+
+
+def _spinner_frame(build: BuildActivity) -> str:
+    frames = ("|", "/", "-", "\\")
+    index = int(build.elapsed_s * 8) % len(frames)
+    return frames[index]
+
+
+def _format_elapsed(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    rest = int(seconds % 60)
+    return f"{minutes}m {rest}s"
+
+
+def _build_number(build: BuildActivity) -> str:
+    return build.id.rsplit("-", 1)[-1]
+
+
+def _renderable_line_count(renderable: Any) -> int:
+    plain = getattr(renderable, "plain", None)
+    if isinstance(plain, str):
+        return max(1, plain.count("\n") + 1)
+    return max(1, str(renderable).count("\n") + 1)
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _command_matches(text: str) -> list[tuple[str, str]]:
+    query = text.strip()
+    if not query.startswith("/"):
+        return []
+    name = query.split(maxsplit=1)[0].lower()
+    if name == "/":
+        return list(COMMANDS)
+    starts = [item for item in COMMANDS if item[0].split()[0].lower().startswith(name)]
+    contains = [
+        item for item in COMMANDS
+        if item not in starts and name.strip("/") in item[0].lower()
+    ]
+    return starts + contains
+
+
+def _footer_line(ui: UiSession, cfg: Config) -> str:
+    build = _latest_build(ui)
+    left = f"Build | {cfg.model} | {cfg.permission_mode}"
+    if build and build.running:
+        left += f" | {build.status}"
+    tokens = ui.agent.usage_total.as_dict()
+    total_tokens = sum(int(v) for v in tokens.values())
+    return (
+        f"{left}    {total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
+        "ctrl+p commands | enter send | ctrl+j newline"
+    )
 
 
 def _status_dot(ui: UiSession) -> str:

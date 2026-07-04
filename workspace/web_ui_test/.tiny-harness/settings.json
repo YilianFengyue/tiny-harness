@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "mode": "default",
+    "allow": [
+      "Write(a.txt)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

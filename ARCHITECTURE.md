@@ -855,11 +855,13 @@ python main.py serve
 ## 12. 依赖
 
 ```
-openai>=1.60     # 唯一运行时依赖
+openai>=1.60     # API 客户端
+rich>=13.7       # TUI/Markdown/文本渲染
+textual>=0.86    # 全屏 terminal UI
 pytest>=8.0      # 仅测试用
 ```
 
-没有 LangChain、没有 python-dotenv、没有 tiktoken、没有 requests——最小依赖证明我们知道每一层在做什么。
+没有 LangChain、没有 python-dotenv、没有 tiktoken、没有 requests。`rich/textual` 只负责 TUI 渲染，不接管 agent loop、工具协议或模型调用。
 
 ---
 
@@ -894,3 +896,29 @@ python eval/run_eval.py --tasks 07,08,09 --runs 1 --max-cost 0.5
 python -m pytest -q
 # 62 passed
 ```
+
+---
+
+## 14. TUI ProMax：OpenCode / Claude Code 风格交互层
+
+`harness/tui_textual.py` 是当前默认 TUI，目标不是复刻一个 dashboard，而是做 terminal-first coding-agent REPL：
+
+- transcript 为主屏，用户消息、assistant 回复、thinking、Build 状态在同一时间线里展示。
+- `/` inline command palette 在输入框上方实时过滤命令，不打断主界面。
+- 一轮用户请求对应一个 `BuildActivity`，工具调用按 `tool_call_id` 折叠进 `ToolActivity`，主屏只显示一个持续刷新的 Build 块。
+- `Ctrl+O` 打开 `BuildDetailScreen`：左侧工具列表支持 hover/click/highlight，右侧显示 input/output/permission/persisted/contextModifier/lifecycle，底部提供 `Parent/Prev/Next` 导航。
+- `assistant_delta.reasoning_content` 进入 `Thinking:` 渲染；没有 reasoning 的模型不会伪造思考内容。
+- transcript 使用稳定 `TranscriptBody.update(...)`，不在刷新时拆掉消息 widget，避免 Textual 鼠标滚动/选择路径崩溃。
+- 启动 logo 在 `harness/tui_textual.py::_tiny_agent_logo()`，是普通 Rich `Text`，可以直接替换 ASCII art 和颜色。
+
+这层只消费 loop 已经产出的事件，不改变 agent 协议：
+
+```text
+assistant_delta.content
+assistant_delta.reasoning_content
+tool_call / tool_queued / tool_validate / tool_permission
+tool_start / tool_result / tool_result_persisted
+tool_context_modified / tool_end
+```
+
+因此 Viewer、eval、trajectory 的语义保持一致，TUI 只是把同一批事件用更适合 coding-agent 的方式折叠展示。

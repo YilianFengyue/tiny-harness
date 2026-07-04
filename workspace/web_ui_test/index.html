@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>北京时间 · Material You</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Flex:opsz,wght@8..144,300..800&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,1,0" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/vuetify@3.7.6/dist/vuetify.min.css" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: light;
+      --md-sys-color-primary: #6750a4;
+      --md-sys-color-on-primary: #ffffff;
+      --md-sys-color-primary-container: #eaddff;
+      --md-sys-color-on-primary-container: #21005d;
+      --md-sys-color-secondary-container: #e8def8;
+      --md-sys-color-tertiary-container: #ffd8e4;
+      --md-sys-color-surface: #fffbfe;
+      --md-sys-color-surface-container: #f3edf7;
+      --md-sys-color-surface-container-high: #ece6f0;
+      --md-sys-color-outline: #79747e;
+      --md-sys-color-shadow: rgba(31, 31, 31, 0.18);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Roboto", "Noto Sans SC", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background:
+        radial-gradient(circle at 10% 20%, rgba(234, 221, 255, 0.95), transparent 30%),
+        radial-gradient(circle at 90% 10%, rgba(255, 216, 228, 0.9), transparent 28%),
+        radial-gradient(circle at 70% 85%, rgba(208, 188, 255, 0.72), transparent 35%),
+        linear-gradient(135deg, #fffbfe 0%, #f7f2fa 100%);
+    }
+
+    .material-symbols-rounded {
+      font-family: "Material Symbols Rounded";
+      font-weight: normal;
+      font-style: normal;
+      font-size: 24px;
+      line-height: 1;
+      letter-spacing: normal;
+      text-transform: none;
+      display: inline-block;
+      white-space: nowrap;
+      word-wrap: normal;
+      direction: ltr;
+      -webkit-font-feature-settings: "liga";
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .page-shell {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .time-card {
+      width: min(920px, 100%);
+      border-radius: 36px !important;
+      background: rgba(255, 251, 254, 0.72) !important;
+      backdrop-filter: blur(26px) saturate(1.25);
+      box-shadow: 0 24px 70px var(--md-sys-color-shadow) !important;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      overflow: hidden;
+    }
+
+    .hero {
+      padding: clamp(26px, 6vw, 58px);
+      background:
+        linear-gradient(135deg, rgba(234, 221, 255, 0.88), rgba(255, 216, 228, 0.64)),
+        var(--md-sys-color-primary-container);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(103, 80, 164, 0.12);
+      color: var(--md-sys-color-on-primary-container);
+      font-weight: 500;
+      letter-spacing: 0.02em;
+    }
+
+    .time-display {
+      margin-top: 28px;
+      font-family: "Roboto Flex", "Roboto", sans-serif;
+      font-size: clamp(4rem, 14vw, 9.5rem);
+      font-weight: 700;
+      line-height: 0.95;
+      letter-spacing: -0.08em;
+      color: #1d1b20;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .seconds {
+      color: var(--md-sys-color-primary);
+      font-size: 0.48em;
+      letter-spacing: -0.04em;
+      vertical-align: baseline;
+    }
+
+    .date-line {
+      margin-top: 18px;
+      color: #49454f;
+      font-size: clamp(1.05rem, 2.5vw, 1.45rem);
+      font-weight: 500;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      padding: 20px;
+    }
+
+    .info-tile {
+      min-height: 116px;
+      border-radius: 28px !important;
+      padding: 20px !important;
+      background: var(--md-sys-color-surface-container) !important;
+      color: #1d1b20 !important;
+    }
+
+    .info-tile:nth-child(2) { background: var(--md-sys-color-secondary-container) !important; }
+    .info-tile:nth-child(3) { background: var(--md-sys-color-tertiary-container) !important; }
+
+    .tile-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #625b71;
+      font-weight: 500;
+      margin-bottom: 12px;
+    }
+
+    .tile-value {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .footer-note {
+      padding: 0 28px 28px;
+      color: #625b71;
+      font-size: 0.95rem;
+      text-align: center;
+    }
+
+    @media (max-width: 720px) {
+      .info-grid { grid-template-columns: 1fr; }
+      .time-card { border-radius: 28px !important; }
+      .hero { padding: 28px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <v-app>
+      <main class="page-shell">
+        <v-card class="time-card" elevation="0">
+          <section class="hero">
+            <div class="eyebrow">
+              <span class="material-symbols-rounded">schedule</span>
+              <span>Asia/Shanghai · UTC+08:00</span>
+            </div>
+
+            <div class="time-display" aria-live="polite" aria-label="当前北京时间">
+              {{ hourMinute }}<span class="seconds">:{{ second }}</span>
+            </div>
+
+            <div class="date-line">{{ fullDate }}</div>
+          </section>
+
+          <section class="info-grid">
+            <v-card class="info-tile" elevation="0">
+              <div class="tile-label">
+                <span class="material-symbols-rounded">calendar_month</span>
+                <span>农历提示</span>
+              </div>
+              <div class="tile-value">公历 {{ shortDate }}</div>
+            </v-card>
+
+            <v-card class="info-tile" elevation="0">
+              <div class="tile-label">
+                <span class="material-symbols-rounded">wb_twilight</span>
+                <span>今日时段</span>
+              </div>
+              <div class="tile-value">{{ dayPeriod }}</div>
+            </v-card>
+
+            <v-card class="info-tile" elevation="0">
+              <div class="tile-label">
+                <span class="material-symbols-rounded">public</span>
+                <span>时区</span>
+              </div>
+              <div class="tile-value">北京时间</div>
+            </v-card>
+          </section>
+
+          <div class="footer-note">
+            使用 Vue 3 + Vuetify 3 构建的 Material You 风格单页时钟，时间每秒自动刷新。
+          </div>
+        </v-card>
+      </main>
+    </v-app>
+  </div>
+
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vuetify@3.7.6/dist/vuetify.min.js"></script>
+  <script>
+    const { createApp, ref, computed, onMounted, onBeforeUnmount } = Vue;
+    const { createVuetify } = Vuetify;
+
+    const beijingFormatter = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
+
+    const fullDateFormatter = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+      weekday: 'long'
+    });
+
+    const shortDateFormatter = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+
+    createApp({
+      setup() {
+        const now = ref(new Date());
+        let timer = null;
+
+        const timeParts = computed(() => beijingFormatter.format(now.value).split(':'));
+        const hourMinute = computed(() => `${timeParts.value[0]}:${timeParts.value[1]}`);
+        const second = computed(() => timeParts.value[2]);
+        const fullDate = computed(() => fullDateFormatter.format(now.value));
+        const shortDate = computed(() => shortDateFormatter.format(now.value));
+        const dayPeriod = computed(() => {
+          const hour = Number(timeParts.value[0]);
+          if (hour < 6) return '深夜好';
+          if (hour < 9) return '早上好';
+          if (hour < 12) return '上午好';
+          if (hour < 14) return '中午好';
+          if (hour < 18) return '下午好';
+          if (hour < 22) return '晚上好';
+          return '夜间好';
+        });
+
+        onMounted(() => {
+          timer = window.setInterval(() => {
+            now.value = new Date();
+          }, 1000);
+        });
+
+        onBeforeUnmount(() => {
+          if (timer) window.clearInterval(timer);
+        });
+
+        return { hourMinute, second, fullDate, shortDate, dayPeriod };
+      }
+    }).use(createVuetify()).mount('#app');
+  </script>
+</body>
+</html>
