@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Generic, TypeVar
 
 from .features import feature_snapshot
+from .memory import memory_summary
 
 T = TypeVar("T")
 Listener = Callable[[], None]
@@ -56,19 +57,25 @@ class AppState:
     settings_sources: tuple[str, ...] = ()
     settings_policy_origin: str | None = None
     features: dict[str, object] = field(default_factory=dict)
+    memory: dict[str, object] = field(default_factory=dict)
     permission_context: object | None = None
 
 
 def build_app_state(cfg, *, permission_context: object | None = None,
-                    status: str = "ready") -> AppState:
+                    status: str = "ready",
+                    memory_runtime: dict[str, object] | None = None) -> AppState:
     snapshot = getattr(cfg, "settings_snapshot", None)
     sources = tuple(layer.source for layer in snapshot.sources) if snapshot else ()
     policy_origin = snapshot.policy_origin if snapshot else None
+    memory = memory_summary(cfg)
+    if memory_runtime:
+        memory = {**memory, "runtime": memory_runtime}
     return AppState(
         model=cfg.model,
         status=status,
         settings_sources=sources,
         settings_policy_origin=policy_origin,
         features=feature_snapshot(cfg),
+        memory=memory,
         permission_context=permission_context,
     )

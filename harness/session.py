@@ -19,6 +19,7 @@ from .loop import (
     build_initial_messages,
     build_resume_messages,
 )
+from .memory_extract import MemoryExtractionController
 from .providers.base import Provider
 from .state import AppState, Store, build_app_state, create_store
 from .telemetry import CostLedger, RunLogger, Usage, new_run_id, read_trajectory
@@ -49,11 +50,15 @@ class AgentSession:
     permission_resolver: Callable | None = None
     permission_context: object | None = None
     app_state: Store[AppState] | None = None
+    memory_controller: MemoryExtractionController | None = None
 
     def __post_init__(self) -> None:
+        if self.memory_controller is None:
+            self.memory_controller = MemoryExtractionController(self.cfg)
         if self.app_state is None:
             self.app_state = create_store(build_app_state(
-                self.cfg, permission_context=self.permission_context))
+                self.cfg, permission_context=self.permission_context,
+                memory_runtime=self.memory_controller.status()))
 
     @classmethod
     def fresh(cls, cfg: Config, provider: Provider) -> "AgentSession":
@@ -65,6 +70,8 @@ class AgentSession:
         events = read_trajectory(cfg.runs_dir, run_id)
         session = cls(cfg=cfg, provider=provider,
                       messages=build_resume_messages(events))
+        if session.memory_controller:
+            session.memory_controller.state.last_processed_index = len(session.messages)
         session.last_run_id = run_id
         for e in events:
             if e["type"] == "run_end":
@@ -87,6 +94,7 @@ class AgentSession:
                             self.cfg.tool_result_budget_chars)
         tool_ctx = ToolContext(self.cfg.workdir, self.cfg.bash_timeout,
                                self.cfg.tool_output_limit)
+        tool_ctx.runtime.config = self.cfg
         tool_ctx.runtime.permission_context = self.permission_context
         tool_ctx.runtime.permission_resolver = self.permission_resolver
         schemas = openai_tool_schemas()
@@ -114,6 +122,11 @@ class AgentSession:
             logger.emit(type_, **event)
 
         terminal = terminal or TerminalState("error", 0, "loop ended without terminal")
+        if terminal.reason == "completed" and self.memory_controller is not None:
+            self.memory_controller.extract(
+                self.messages,
+                emit=lambda event: _emit_memory_event(event, events, on_event, logger),
+            )
         summary = logger.finish(terminal.reason, terminal.turns, ledger,
                                 terminal.final_message)
         self.usage_total.add(_usage_from_dict(summary["usage_total"]))
@@ -122,6 +135,18 @@ class AgentSession:
         self.permission_context = tool_ctx.runtime.permission_context
         self._refresh_app_state(status=summary["reason"])
         return SessionTurn(run_id=logger.run_id, summary=summary, events=events)
+
+    def extract_memory(self, *, force: bool = True,
+                       on_event: EventCallback | None = None) -> list[dict]:
+        if self.memory_controller is None:
+            self.memory_controller = MemoryExtractionController(self.cfg)
+        return self.memory_controller.extract(self.messages, emit=on_event, force=force)
+
+    def set_memory_auto_extract(self, enabled: bool) -> None:
+        if self.memory_controller is None:
+            self.memory_controller = MemoryExtractionController(self.cfg)
+        self.memory_controller.set_enabled(enabled)
+        self._refresh_app_state()
 
     def cancel_current(self) -> None:
         self.cancel_token.cancel()
@@ -148,10 +173,14 @@ class AgentSession:
     def _refresh_app_state(self, status: str = "ready") -> None:
         if self.app_state is None:
             self.app_state = create_store(build_app_state(
-                self.cfg, permission_context=self.permission_context, status=status))
+                self.cfg, permission_context=self.permission_context, status=status,
+                memory_runtime=(
+                    self.memory_controller.status() if self.memory_controller else None)))
             return
         self.app_state.set_state(lambda _prev: build_app_state(
-            self.cfg, permission_context=self.permission_context, status=status))
+            self.cfg, permission_context=self.permission_context, status=status,
+            memory_runtime=(
+                self.memory_controller.status() if self.memory_controller else None)))
 
 
 def _usage_from_dict(raw: dict) -> Usage:
@@ -161,3 +190,13 @@ def _usage_from_dict(raw: dict) -> Usage:
         completion_tokens=int(raw.get("completion_tokens", 0)),
         reasoning_tokens=int(raw.get("reasoning_tokens", 0)),
     )
+
+
+def _emit_memory_event(event: dict, events: list[dict],
+                       on_event: EventCallback | None, logger: RunLogger) -> None:
+    payload = dict(event)
+    events.append(dict(payload))
+    if on_event:
+        on_event(dict(payload))
+    type_ = payload.pop("type")
+    logger.emit(type_, **payload)

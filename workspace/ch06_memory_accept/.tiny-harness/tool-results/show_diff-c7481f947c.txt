@@ -1,0 +1,534 @@
+diff --git a/harness/loop.py b/harness/loop.py
+index ac5ac90..d81dc2f 100644
+--- a/harness/loop.py
++++ b/harness/loop.py
+@@ -28,6 +28,8 @@ from .hooks import (
+     resolve_permission_decision,
+ )
+ from .features import feature_snapshot
++from .memory import memory_summary, render_memory_prompt
++from .memory_extract import MemoryExtractionController
+ from .providers.base import ModelTurn, Provider, ToolCallRequest
+ from .skills import render_skills_section
+ from .telemetry import CostLedger, RunLogger
+@@ -96,6 +98,7 @@ class AgentState:
+ def build_initial_messages(task: str, cfg: Config) -> list[dict]:
+     system = SYSTEM_PROMPT.format(workdir=cfg.workdir,
+                                   skills=render_skills_section(cfg.skills))
++    system += render_memory_prompt(cfg)
+     return [{"role": "system", "content": system},
+             {"role": "user", "content": task}]
+ 
+@@ -110,6 +113,7 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
+     cm = ContextManager(cfg.context_budget, cfg.context_keep_recent,
+                         cfg.context_hard_limit, cfg.tool_result_budget_chars)
+     tool_ctx = ToolContext(cfg.workdir, cfg.bash_timeout, cfg.tool_output_limit)
++    tool_ctx.runtime.config = cfg
+ 
+     events = _run_agent_events(task, cfg, provider, schemas, ledger, cm, tool_ctx, messages)
+     terminal: TerminalState | None = None
+@@ -124,6 +128,12 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
+         logger.emit(type_, **event)
+ 
+     terminal = terminal or TerminalState("error", 0, "loop ended without terminal state")
++    if terminal.reason == "completed":
++        controller = MemoryExtractionController(cfg)
++        controller.extract(
++            messages,
++            emit=lambda event: _emit_event_dict(logger, event),
++        )
+     return logger.finish(terminal.reason, terminal.turns, ledger, terminal.final_message)
+ 
+ 
+@@ -134,6 +144,7 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
+                       cancel_token: CancellationToken | None = None):
+     state = AgentState(messages=messages)
+     settings_snapshot = cfg.settings_snapshot
++    mem_summary = memory_summary(cfg)
+     yield {
+         "type": "run_start",
+         "task": task,
+@@ -158,7 +169,10 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
+             for e in settings_snapshot.errors
+         ] if settings_snapshot else [],
+         "features": feature_snapshot(cfg),
++        "memory": mem_summary,
+     }
++    if mem_summary["count"]:
++        yield {"type": "memory_load", **mem_summary}
+ 
+     try:
+         while state.turn < cfg.max_turns:
+@@ -515,3 +529,9 @@ def _openai_version() -> str:
+         return openai.__version__
+     except Exception:
+         return "unknown"
++
++
++def _emit_event_dict(logger: RunLogger, event: dict) -> None:
++    payload = dict(event)
++    type_ = payload.pop("type")
++    logger.emit(type_, **payload)
+diff --git a/harness/session.py b/harness/session.py
+index 9cad296..38065e1 100644
+--- a/harness/session.py
++++ b/harness/session.py
+@@ -19,6 +19,7 @@ from .loop import (
+     build_initial_messages,
+     build_resume_messages,
+ )
++from .memory_extract import MemoryExtractionController
+ from .providers.base import Provider
+ from .state import AppState, Store, build_app_state, create_store
+ from .telemetry import CostLedger, RunLogger, Usage, new_run_id, read_trajectory
+@@ -49,11 +50,15 @@ class AgentSession:
+     permission_resolver: Callable | None = None
+     permission_context: object | None = None
+     app_state: Store[AppState] | None = None
++    memory_controller: MemoryExtractionController | None = None
+ 
+     def __post_init__(self) -> None:
++        if self.memory_controller is None:
++            self.memory_controller = MemoryExtractionController(self.cfg)
+         if self.app_state is None:
+             self.app_state = create_store(build_app_state(
+-                self.cfg, permission_context=self.permission_context))
++                self.cfg, permission_context=self.permission_context,
++                memory_runtime=self.memory_controller.status()))
+ 
+     @classmethod
+     def fresh(cls, cfg: Config, provider: Provider) -> "AgentSession":
+@@ -65,6 +70,8 @@ class AgentSession:
+         events = read_trajectory(cfg.runs_dir, run_id)
+         session = cls(cfg=cfg, provider=provider,
+                       messages=build_resume_messages(events))
++        if session.memory_controller:
++            session.memory_controller.state.last_processed_index = len(session.messages)
+         session.last_run_id = run_id
+         for e in events:
+             if e["type"] == "run_end":
+@@ -87,6 +94,7 @@ class AgentSession:
+                             self.cfg.tool_result_budget_chars)
+         tool_ctx = ToolContext(self.cfg.workdir, self.cfg.bash_timeout,
+                                self.cfg.tool_output_limit)
++        tool_ctx.runtime.config = self.cfg
+         tool_ctx.runtime.permission_context = self.permission_context
+         tool_ctx.runtime.permission_resolver = self.permission_resolver
+         schemas = openai_tool_schemas()
+@@ -114,6 +122,11 @@ class AgentSession:
+             logger.emit(type_, **event)
+ 
+         terminal = terminal or TerminalState("error", 0, "loop ended without terminal")
++        if terminal.reason == "completed" and self.memory_controller is not None:
++            self.memory_controller.extract(
++                self.messages,
++                emit=lambda event: _emit_memory_event(event, events, on_event, logger),
++            )
+         summary = logger.finish(terminal.reason, terminal.turns, ledger,
+                                 terminal.final_message)
+         self.usage_total.add(_usage_from_dict(summary["usage_total"]))
+@@ -123,6 +136,18 @@ class AgentSession:
+         self._refresh_app_state(status=summary["reason"])
+         return SessionTurn(run_id=logger.run_id, summary=summary, events=events)
+ 
++    def extract_memory(self, *, force: bool = True,
++                       on_event: EventCallback | None = None) -> list[dict]:
++        if self.memory_controller is None:
++            self.memory_controller = MemoryExtractionController(self.cfg)
++        return self.memory_controller.extract(self.messages, emit=on_event, force=force)
++
++    def set_memory_auto_extract(self, enabled: bool) -> None:
++        if self.memory_controller is None:
++            self.memory_controller = MemoryExtractionController(self.cfg)
++        self.memory_controller.set_enabled(enabled)
++        self._refresh_app_state()
++
+     def cancel_current(self) -> None:
+         self.cancel_token.cancel()
+         self._set_status("cancelled")
+@@ -148,10 +173,14 @@ class AgentSession:
+     def _refresh_app_state(self, status: str = "ready") -> None:
+         if self.app_state is None:
+             self.app_state = create_store(build_app_state(
+-                self.cfg, permission_context=self.permission_context, status=status))
++                self.cfg, permission_context=self.permission_context, status=status,
++                memory_runtime=(
++                    self.memory_controller.status() if self.memory_controller else None)))
+             return
+         self.app_state.set_state(lambda _prev: build_app_state(
+-            self.cfg, permission_context=self.permission_context, status=status))
++            self.cfg, permission_context=self.permission_context, status=status,
++            memory_runtime=(
++                self.memory_controller.status() if self.memory_controller else None)))
+ 
+ 
+ def _usage_from_dict(raw: dict) -> Usage:
+@@ -161,3 +190,13 @@ def _usage_from_dict(raw: dict) -> Usage:
+         completion_tokens=int(raw.get("completion_tokens", 0)),
+         reasoning_tokens=int(raw.get("reasoning_tokens", 0)),
+     )
++
++
++def _emit_memory_event(event: dict, events: list[dict],
++                       on_event: EventCallback | None, logger: RunLogger) -> None:
++    payload = dict(event)
++    events.append(dict(payload))
++    if on_event:
++        on_event(dict(payload))
++    type_ = payload.pop("type")
++    logger.emit(type_, **payload)
+diff --git a/harness/state.py b/harness/state.py
+index c471670..70f3fad 100644
+--- a/harness/state.py
++++ b/harness/state.py
+@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
+ from typing import Callable, Generic, TypeVar
+ 
+ from .features import feature_snapshot
++from .memory import memory_summary
+ 
+ T = TypeVar("T")
+ Listener = Callable[[], None]
+@@ -56,19 +57,25 @@ class AppState:
+     settings_sources: tuple[str, ...] = ()
+     settings_policy_origin: str | None = None
+     features: dict[str, object] = field(default_factory=dict)
++    memory: dict[str, object] = field(default_factory=dict)
+     permission_context: object | None = None
+ 
+ 
+ def build_app_state(cfg, *, permission_context: object | None = None,
+-                    status: str = "ready") -> AppState:
++                    status: str = "ready",
++                    memory_runtime: dict[str, object] | None = None) -> AppState:
+     snapshot = getattr(cfg, "settings_snapshot", None)
+     sources = tuple(layer.source for layer in snapshot.sources) if snapshot else ()
+     policy_origin = snapshot.policy_origin if snapshot else None
++    memory = memory_summary(cfg)
++    if memory_runtime:
++        memory = {**memory, "runtime": memory_runtime}
+     return AppState(
+         model=cfg.model,
+         status=status,
+         settings_sources=sources,
+         settings_policy_origin=policy_origin,
+         features=feature_snapshot(cfg),
++        memory=memory,
+         permission_context=permission_context,
+     )
+diff --git a/harness/tools/__init__.py b/harness/tools/__init__.py
+index eb4555c..bd91051 100644
+--- a/harness/tools/__init__.py
++++ b/harness/tools/__init__.py
+@@ -7,7 +7,7 @@ from .registry import (
+     openai_tool_schemas,
+     tool,
+ )
+-from . import bash, calculator, files, search  # noqa: F401  导入即注册
++from . import bash, calculator, files, memory, search  # noqa: F401  导入即注册
+ 
+ __all__ = [
+     "REGISTRY",
+diff --git a/harness/tools/registry.py b/harness/tools/registry.py
+index e321dc4..bb2c65c 100644
+--- a/harness/tools/registry.py
++++ b/harness/tools/registry.py
+@@ -38,6 +38,7 @@ class ToolRuntimeState:
+     persisted_results: dict[str, str] = field(default_factory=dict)
+     permission_context: object | None = None
+     permission_resolver: PermissionResolver | None = None
++    config: object | None = None
+ 
+ 
+ @dataclass
+diff --git a/harness/tui.py b/harness/tui.py
+index b8999b2..03ff1f0 100644
+--- a/harness/tui.py
++++ b/harness/tui.py
+@@ -17,6 +17,16 @@ from .permissions import (
+ )
+ from .providers.base import Provider
+ from .session import AgentSession
++from .memory_view import (
++    add_memory_from_text,
++    extract_memory_for_session,
++    forget_memory_from_text,
++    format_memory_runtime_status,
++    format_memory_summary,
++    format_memory_tail,
++    memory_status_line,
++    rebuild_memory_index_for_cfg,
++)
+ from .settings_view import format_features, format_settings_summary, settings_status_line
+ 
+ 
+@@ -74,10 +84,11 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> No
+     print(f"workdir:    {cfg.workdir}")
+     print(f"runs_dir:   {cfg.runs_dir}")
+     print(f"settings:   {settings_status_line(cfg)}")
++    print(f"memory:     {memory_status_line(cfg)}")
+     if resume_run_id:
+         print(f"resumed:    {resume_run_id}")
+     print("-" * 64)
+-    print("Commands: /help  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
++    print("Commands: /help  /memory  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
+     print("=" * 64)
+ 
+ 
+@@ -91,6 +102,8 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
+         print("  /cost   Show cumulative session token/cost totals")
+         print("  /trace  Print latest trajectory path and viewer URL")
+         print("  /runs   List recent run ids in this runs directory")
++        print("  /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
++        print("          Add format: /memory add <type> <title> | <description> | <content>")
+         print("  /settings [sources|effective|trust]  Show config snapshot")
+         print("  /features  Show active feature flags")
+         print("  /permissions  Show active permission mode/rules")
+@@ -129,6 +142,9 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
+             mark = " *" if p.name == session.last_run_id else "  "
+             print(f"{mark} {p.name}")
+         return False
++    if name == "/memory":
++        _handle_memory_command(rest, cfg, session)
++        return False
+     if name == "/settings":
+         print(format_settings_summary(cfg, rest))
+         return False
+@@ -154,6 +170,51 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
+     return False
+ 
+ 
++def _handle_memory_command(text: str, cfg: Config, session: AgentSession) -> None:
++    rest = text.strip()
++    if not rest:
++        print(format_memory_summary(cfg))
++        return
++    name, _, tail = rest.partition(" ")
++    if name == "status":
++        print(format_memory_runtime_status(cfg, session.memory_controller))
++        return
++    if name == "tail":
++        print(format_memory_tail(cfg, tail.strip()))
++        return
++    if name == "extract":
++        print("◈ Extracting..")
++        print(extract_memory_for_session(session))
++        return
++    if name == "on":
++        session.set_memory_auto_extract(True)
++        print("[◈ Memory Auto Extract On]")
++        return
++    if name == "off":
++        session.set_memory_auto_extract(False)
++        print("[◈ Memory Auto Extract Off]")
++        return
++    if name == "add":
++        print(add_memory_from_text(cfg, tail))
++        return
++    if name == "forget":
++        print(forget_memory_from_text(cfg, tail))
++        return
++    if name == "rebuild":
++        print(rebuild_memory_index_for_cfg(cfg))
++        return
++    if name == "list":
++        print(format_memory_summary(cfg, f"list {tail}".strip()))
++        return
++    if name == "read":
++        print(format_memory_summary(cfg, f"read {tail}".strip()))
++        return
++    if name in {"sources", "prompt"}:
++        print(format_memory_summary(cfg, name))
++        return
++    print("Usage: /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
++
++
+ def _handle_rule_command(behavior: str, text: str, cfg: Config,
+                          session: AgentSession) -> None:
+     raw, destination = _split_destination(text)
+@@ -218,6 +279,19 @@ def _print_event(event: dict) -> None:
+             print(content, end="", flush=True)
+     elif t == "stream_request_start":
+         print(f"[stream] request turn={event['turn']} model={event['model']}")
++    elif t == "memory_extract_start":
++        print("◈ Extracting..")
++    elif t == "memory_extract_saved":
++        paths = ", ".join(event.get("paths") or [])
++        print(f"[◈ Memory Saved] {event.get('count', 0)} {paths}")
++    elif t == "memory_extract_skipped":
++        print(f"◈ Memory skipped: {event.get('reason')}")
++    elif t == "memory_extract_error":
++        print(f"◈ Memory error: {event.get('error')}", file=sys.stderr)
++    elif t == "memory_extract_trailing":
++        print(f"◈ Extracting.. {event.get('status')}")
++    elif t == "memory_load":
++        print(f"[◈ Memory Loaded] {event.get('count', 0)}")
+     elif t == "turn_start":
+         transition = event.get("transition") or "fresh"
+         print(f"[turn {event['turn']}] start ({transition})")
+diff --git a/harness/tui_textual.py b/harness/tui_textual.py
+index 2cd2533..6f2f35f 100644
+--- a/harness/tui_textual.py
++++ b/harness/tui_textual.py
+@@ -28,6 +28,16 @@ from .permissions import (
+ )
+ from .providers.base import Provider
+ from .session import AgentSession
++from .memory_view import (
++    add_memory_from_text,
++    extract_memory_for_session,
++    forget_memory_from_text,
++    format_memory_runtime_status,
++    format_memory_summary,
++    format_memory_tail,
++    memory_status_line,
++    rebuild_memory_index_for_cfg,
++)
+ from .settings_view import (
+     format_features,
+     format_settings_summary,
+@@ -157,6 +167,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
+     ("/trace", "show latest trajectory path and viewer URL"),
+     ("/build <n>", "open details for a build block"),
+     ("/runs", "list recent run ids"),
++    ("/memory [status|sources|prompt|tail|extract|on|off|list|read|add|forget|rebuild]", "manage persistent memory"),
+     ("/settings [sources|effective|trust]", "show config snapshot"),
+     ("/features", "show active feature flags"),
+     ("/permissions", "show active permission mode and rules"),
+@@ -184,6 +195,14 @@ TOOL_EVENT_TYPES = {
+     "tool_context_modified",
+ }
+ 
++MEMORY_EVENT_TYPES = {
++    "memory_extract_start",
++    "memory_extract_saved",
++    "memory_extract_skipped",
++    "memory_extract_error",
++    "memory_extract_trailing",
++}
++
+ 
+ if _TUI_IMPORT_ERROR is None:
+ 
+@@ -987,6 +1006,12 @@ if _TUI_IMPORT_ERROR is None:
+                 ui.status = _compact(_format_context_edit(event), 90)
+             elif kind == "stream_request_start":
+                 ui.status = f"request turn={event.get('turn')} model={event.get('model')}"
++            elif kind == "memory_load":
++                count = int(event.get("count") or 0)
++                if count:
++                    ui.status = f"◈ Memory Loaded: {count}"
++            elif kind in MEMORY_EVENT_TYPES:
++                ui.status = _format_memory_event_status(event)
+             if sid == self.current_id:
+                 self._refresh_all()
+ 
+@@ -1074,6 +1099,9 @@ if _TUI_IMPORT_ERROR is None:
+             if name == "/runs":
+                 self._add_system(_format_runs(self.cfg.runs_dir, self._current().agent.last_run_id))
+                 return
++            if name == "/memory":
++                self._add_system(_handle_memory_command(rest, self.cfg, self._current().agent))
++                return
+             if name == "/settings":
+                 self._add_system(format_settings_summary(self.cfg, rest))
+                 return
+@@ -1797,12 +1825,44 @@ def _footer_line(ui: UiSession, cfg: Config) -> str:
+     tokens = ui.agent.usage_total.as_dict()
+     total_tokens = sum(int(v) for v in tokens.values())
+     return (
+-        f"{left} | {settings_status_line(cfg)}    "
++        f"{left} | {settings_status_line(cfg)} | {memory_status_line(cfg)}    "
+         f"{total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
+         "ctrl+p commands | enter send | ctrl+j newline"
+     )
+ 
+ 
++def _handle_memory_command(text: str, cfg: Config, session: AgentSession) -> str:
++    rest = text.strip()
++    if not rest:
++        return format_memory_summary(cfg)
++    name, _, tail = rest.partition(" ")
++    if name == "status":
++        return format_memory_runtime_status(cfg, session.memory_controller)
++    if name == "tail":
++        return format_memory_tail(cfg, tail.strip())
++    if name == "extract":
++        return "◈ Extracting..\n" + extract_memory_for_session(session)
++    if name == "on":
++        session.set_memory_auto_extract(True)
++        return "[◈ Memory Auto Extract On]"
++    if name == "off":
++        session.set_memory_auto_extract(False)
++        return "[◈ Memory Auto Extract Off]"
++    if name == "add":
++        return add_memory_from_text(cfg, tail)
++    if name == "forget":
++        return forget_memory_from_text(cfg, tail)
++    if name == "rebuild":
++        return rebuild_memory_index_for_cfg(cfg)
++    if name == "list":
++        return format_memory_summary(cfg, f"list {tail}".strip())
++    if name == "read":
++        return format_memory_summary(cfg, f"read {tail}".strip())
++    if name in {"sources", "prompt"}:
++        return format_memory_summary(cfg, name)
++    return "Usage: /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]"
++
++
+ def _status_dot(ui: UiSession) -> str:
+     if ui.running:
+         return "*"
+@@ -1851,6 +1911,19 @@ def _format_context_edit(event: dict) -> str:
+     return f"context lifecycle: {details}"
+ 
+ 
++def _format_memory_event_status(event: dict) -> str:
++    kind = event.get("type")
++    if kind == "memory_extract_start":
++        return "◈ Extracting.."
++    if kind == "memory_extract_saved":
++        return f"[◈ Memory Saved] {event.get('count', 0)}"
++    if kind == "memory_extract_error":
++        return f"◈ Memory Error: {_compact(str(event.get('error') or ''), 60)}"
++    if kind == "memory_extract_trailing":
++        return f"◈ Extracting.. {event.get('status')}"
++    return f"◈ Memory skipped: {event.get('reason')}"
++
++
+ def _format_cost(summary: dict) -> str:
+     usage = summary["usage_total"]
+     note = " (pricing unknown)" if summary["pricing_unknown"] else ""
+diff --git a/tests/test_session.py b/tests/test_session.py
+index f78f17b..02afb07 100644
+--- a/tests/test_session.py
++++ b/tests/test_session.py
+@@ -75,10 +75,12 @@ def test_session_app_state_and_run_start_include_settings_features(make_cfg, tmp
+     state = session.app_state.get_state()
+     assert state.status == "completed"
+     assert state.features["coding_acceptance_trace"] is True
++    assert state.memory["enabled"] is True
+     events = read_trajectory(cfg.runs_dir, result.run_id)
+     start = events[0]
+     assert start["settings_sources"][0]["source"] == "projectSettings"
+     assert start["features"]["coding_acceptance_trace"] is True
++    assert start["memory"]["enabled"] is True
+ 
+ 
+ def test_session_permission_context_survives_between_submits(make_cfg):
+diff --git a/tests/test_tui_textual.py b/tests/test_tui_textual.py
+index 055e89d..de044e4 100644
+--- a/tests/test_tui_textual.py
++++ b/tests/test_tui_textual.py
+@@ -86,9 +86,11 @@ def test_tui_slash_menu_filters_commands():
+ def test_tui_slash_menu_includes_settings_and_features():
+     settings = _command_matches("/set")
+     features = _command_matches("/fea")
++    memory = _command_matches("/mem")
+ 
+     assert settings and settings[0][0].startswith("/settings")
+     assert features and features[0][0].startswith("/features")
++    assert memory and memory[0][0].startswith("/memory")
+ 
+ 
+ def test_build_activity_collects_thinking_and_tool_refs():

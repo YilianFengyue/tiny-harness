@@ -75,10 +75,12 @@ def test_session_app_state_and_run_start_include_settings_features(make_cfg, tmp
     state = session.app_state.get_state()
     assert state.status == "completed"
     assert state.features["coding_acceptance_trace"] is True
+    assert state.memory["enabled"] is True
     events = read_trajectory(cfg.runs_dir, result.run_id)
     start = events[0]
     assert start["settings_sources"][0]["source"] == "projectSettings"
     assert start["features"]["coding_acceptance_trace"] is True
+    assert start["memory"]["enabled"] is True
 
 
 def test_session_permission_context_survives_between_submits(make_cfg):

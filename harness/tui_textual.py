@@ -28,6 +28,16 @@ from .permissions import (
 )
 from .providers.base import Provider
 from .session import AgentSession
+from .memory_view import (
+    add_memory_from_text,
+    extract_memory_for_session,
+    forget_memory_from_text,
+    format_memory_runtime_status,
+    format_memory_summary,
+    format_memory_tail,
+    memory_status_line,
+    rebuild_memory_index_for_cfg,
+)
 from .settings_view import (
     format_features,
     format_settings_summary,
@@ -157,6 +167,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/trace", "show latest trajectory path and viewer URL"),
     ("/build <n>", "open details for a build block"),
     ("/runs", "list recent run ids"),
+    ("/memory [status|sources|prompt|tail|extract|on|off|list|read|add|forget|rebuild]", "manage persistent memory"),
     ("/settings [sources|effective|trust]", "show config snapshot"),
     ("/features", "show active feature flags"),
     ("/permissions", "show active permission mode and rules"),
@@ -182,6 +193,14 @@ TOOL_EVENT_TYPES = {
     "tool_result",
     "tool_end",
     "tool_context_modified",
+}
+
+MEMORY_EVENT_TYPES = {
+    "memory_extract_start",
+    "memory_extract_saved",
+    "memory_extract_skipped",
+    "memory_extract_error",
+    "memory_extract_trailing",
 }
 
 
@@ -987,6 +1006,12 @@ if _TUI_IMPORT_ERROR is None:
                 ui.status = _compact(_format_context_edit(event), 90)
             elif kind == "stream_request_start":
                 ui.status = f"request turn={event.get('turn')} model={event.get('model')}"
+            elif kind == "memory_load":
+                count = int(event.get("count") or 0)
+                if count:
+                    ui.status = f"◈ Memory Loaded: {count}"
+            elif kind in MEMORY_EVENT_TYPES:
+                ui.status = _format_memory_event_status(event)
             if sid == self.current_id:
                 self._refresh_all()
 
@@ -1073,6 +1098,9 @@ if _TUI_IMPORT_ERROR is None:
                 return
             if name == "/runs":
                 self._add_system(_format_runs(self.cfg.runs_dir, self._current().agent.last_run_id))
+                return
+            if name == "/memory":
+                self._add_system(_handle_memory_command(rest, self.cfg, self._current().agent))
                 return
             if name == "/settings":
                 self._add_system(format_settings_summary(self.cfg, rest))
@@ -1797,10 +1825,42 @@ def _footer_line(ui: UiSession, cfg: Config) -> str:
     tokens = ui.agent.usage_total.as_dict()
     total_tokens = sum(int(v) for v in tokens.values())
     return (
-        f"{left} | {settings_status_line(cfg)}    "
+        f"{left} | {settings_status_line(cfg)} | {memory_status_line(cfg)}    "
         f"{total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
         "ctrl+p commands | enter send | ctrl+j newline"
     )
+
+
+def _handle_memory_command(text: str, cfg: Config, session: AgentSession) -> str:
+    rest = text.strip()
+    if not rest:
+        return format_memory_summary(cfg)
+    name, _, tail = rest.partition(" ")
+    if name == "status":
+        return format_memory_runtime_status(cfg, session.memory_controller)
+    if name == "tail":
+        return format_memory_tail(cfg, tail.strip())
+    if name == "extract":
+        return "◈ Extracting..\n" + extract_memory_for_session(session)
+    if name == "on":
+        session.set_memory_auto_extract(True)
+        return "[◈ Memory Auto Extract On]"
+    if name == "off":
+        session.set_memory_auto_extract(False)
+        return "[◈ Memory Auto Extract Off]"
+    if name == "add":
+        return add_memory_from_text(cfg, tail)
+    if name == "forget":
+        return forget_memory_from_text(cfg, tail)
+    if name == "rebuild":
+        return rebuild_memory_index_for_cfg(cfg)
+    if name == "list":
+        return format_memory_summary(cfg, f"list {tail}".strip())
+    if name == "read":
+        return format_memory_summary(cfg, f"read {tail}".strip())
+    if name in {"sources", "prompt"}:
+        return format_memory_summary(cfg, name)
+    return "Usage: /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]"
 
 
 def _status_dot(ui: UiSession) -> str:
@@ -1849,6 +1909,19 @@ def _audit_style(event: dict) -> str:
 def _format_context_edit(event: dict) -> str:
     details = " ".join(f"{k}={v}" for k, v in event.items() if k != "type")
     return f"context lifecycle: {details}"
+
+
+def _format_memory_event_status(event: dict) -> str:
+    kind = event.get("type")
+    if kind == "memory_extract_start":
+        return "◈ Extracting.."
+    if kind == "memory_extract_saved":
+        return f"[◈ Memory Saved] {event.get('count', 0)}"
+    if kind == "memory_extract_error":
+        return f"◈ Memory Error: {_compact(str(event.get('error') or ''), 60)}"
+    if kind == "memory_extract_trailing":
+        return f"◈ Extracting.. {event.get('status')}"
+    return f"◈ Memory skipped: {event.get('reason')}"
 
 
 def _format_cost(summary: dict) -> str:

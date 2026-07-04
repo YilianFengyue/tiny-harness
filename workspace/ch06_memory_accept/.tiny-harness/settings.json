@@ -1,0 +1,20 @@
+{
+  "autoMemoryEnabled": true,
+  "memory": {
+    "autoExtract": true,
+    "extractEveryTurns": 1,
+    "extractMaxMessages": 20
+  },
+  "features": {
+    "memory_tui": true
+  },
+  "permission_mode": "acceptEdits",
+  "permissions": {
+    "mode": "default",
+    "allow": [
+      "Bash(python -m pytest -q)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

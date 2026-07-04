@@ -86,9 +86,11 @@ def test_tui_slash_menu_filters_commands():
 def test_tui_slash_menu_includes_settings_and_features():
     settings = _command_matches("/set")
     features = _command_matches("/fea")
+    memory = _command_matches("/mem")
 
     assert settings and settings[0][0].startswith("/settings")
     assert features and features[0][0].startswith("/features")
+    assert memory and memory[0][0].startswith("/memory")
 
 
 def test_build_activity_collects_thinking_and_tool_refs():

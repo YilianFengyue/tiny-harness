@@ -28,6 +28,8 @@ from .hooks import (
     resolve_permission_decision,
 )
 from .features import feature_snapshot
+from .memory import memory_summary, render_memory_prompt
+from .memory_extract import MemoryExtractionController
 from .providers.base import ModelTurn, Provider, ToolCallRequest
 from .skills import render_skills_section
 from .telemetry import CostLedger, RunLogger
@@ -96,6 +98,7 @@ class AgentState:
 def build_initial_messages(task: str, cfg: Config) -> list[dict]:
     system = SYSTEM_PROMPT.format(workdir=cfg.workdir,
                                   skills=render_skills_section(cfg.skills))
+    system += render_memory_prompt(cfg)
     return [{"role": "system", "content": system},
             {"role": "user", "content": task}]
 
@@ -110,6 +113,7 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
     cm = ContextManager(cfg.context_budget, cfg.context_keep_recent,
                         cfg.context_hard_limit, cfg.tool_result_budget_chars)
     tool_ctx = ToolContext(cfg.workdir, cfg.bash_timeout, cfg.tool_output_limit)
+    tool_ctx.runtime.config = cfg
 
     events = _run_agent_events(task, cfg, provider, schemas, ledger, cm, tool_ctx, messages)
     terminal: TerminalState | None = None
@@ -124,6 +128,12 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
         logger.emit(type_, **event)
 
     terminal = terminal or TerminalState("error", 0, "loop ended without terminal state")
+    if terminal.reason == "completed":
+        controller = MemoryExtractionController(cfg)
+        controller.extract(
+            messages,
+            emit=lambda event: _emit_event_dict(logger, event),
+        )
     return logger.finish(terminal.reason, terminal.turns, ledger, terminal.final_message)
 
 
@@ -134,6 +144,7 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                       cancel_token: CancellationToken | None = None):
     state = AgentState(messages=messages)
     settings_snapshot = cfg.settings_snapshot
+    mem_summary = memory_summary(cfg)
     yield {
         "type": "run_start",
         "task": task,
@@ -158,7 +169,10 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
             for e in settings_snapshot.errors
         ] if settings_snapshot else [],
         "features": feature_snapshot(cfg),
+        "memory": mem_summary,
     }
+    if mem_summary["count"]:
+        yield {"type": "memory_load", **mem_summary}
 
     try:
         while state.turn < cfg.max_turns:
@@ -515,3 +529,9 @@ def _openai_version() -> str:
         return openai.__version__
     except Exception:
         return "unknown"
+
+
+def _emit_event_dict(logger: RunLogger, event: dict) -> None:
+    payload = dict(event)
+    type_ = payload.pop("type")
+    logger.emit(type_, **payload)

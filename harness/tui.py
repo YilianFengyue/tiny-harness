@@ -17,6 +17,16 @@ from .permissions import (
 )
 from .providers.base import Provider
 from .session import AgentSession
+from .memory_view import (
+    add_memory_from_text,
+    extract_memory_for_session,
+    forget_memory_from_text,
+    format_memory_runtime_status,
+    format_memory_summary,
+    format_memory_tail,
+    memory_status_line,
+    rebuild_memory_index_for_cfg,
+)
 from .settings_view import format_features, format_settings_summary, settings_status_line
 
 
@@ -74,10 +84,11 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> No
     print(f"workdir:    {cfg.workdir}")
     print(f"runs_dir:   {cfg.runs_dir}")
     print(f"settings:   {settings_status_line(cfg)}")
+    print(f"memory:     {memory_status_line(cfg)}")
     if resume_run_id:
         print(f"resumed:    {resume_run_id}")
     print("-" * 64)
-    print("Commands: /help  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
+    print("Commands: /help  /memory  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
     print("=" * 64)
 
 
@@ -91,6 +102,8 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print("  /cost   Show cumulative session token/cost totals")
         print("  /trace  Print latest trajectory path and viewer URL")
         print("  /runs   List recent run ids in this runs directory")
+        print("  /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
+        print("          Add format: /memory add <type> <title> | <description> | <content>")
         print("  /settings [sources|effective|trust]  Show config snapshot")
         print("  /features  Show active feature flags")
         print("  /permissions  Show active permission mode/rules")
@@ -129,6 +142,9 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
             mark = " *" if p.name == session.last_run_id else "  "
             print(f"{mark} {p.name}")
         return False
+    if name == "/memory":
+        _handle_memory_command(rest, cfg, session)
+        return False
     if name == "/settings":
         print(format_settings_summary(cfg, rest))
         return False
@@ -152,6 +168,51 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
     if rest:
         print(f"(ignored trailing text: {rest})")
     return False
+
+
+def _handle_memory_command(text: str, cfg: Config, session: AgentSession) -> None:
+    rest = text.strip()
+    if not rest:
+        print(format_memory_summary(cfg))
+        return
+    name, _, tail = rest.partition(" ")
+    if name == "status":
+        print(format_memory_runtime_status(cfg, session.memory_controller))
+        return
+    if name == "tail":
+        print(format_memory_tail(cfg, tail.strip()))
+        return
+    if name == "extract":
+        print("◈ Extracting..")
+        print(extract_memory_for_session(session))
+        return
+    if name == "on":
+        session.set_memory_auto_extract(True)
+        print("[◈ Memory Auto Extract On]")
+        return
+    if name == "off":
+        session.set_memory_auto_extract(False)
+        print("[◈ Memory Auto Extract Off]")
+        return
+    if name == "add":
+        print(add_memory_from_text(cfg, tail))
+        return
+    if name == "forget":
+        print(forget_memory_from_text(cfg, tail))
+        return
+    if name == "rebuild":
+        print(rebuild_memory_index_for_cfg(cfg))
+        return
+    if name == "list":
+        print(format_memory_summary(cfg, f"list {tail}".strip()))
+        return
+    if name == "read":
+        print(format_memory_summary(cfg, f"read {tail}".strip()))
+        return
+    if name in {"sources", "prompt"}:
+        print(format_memory_summary(cfg, name))
+        return
+    print("Usage: /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
 
 
 def _handle_rule_command(behavior: str, text: str, cfg: Config,
@@ -218,6 +279,19 @@ def _print_event(event: dict) -> None:
             print(content, end="", flush=True)
     elif t == "stream_request_start":
         print(f"[stream] request turn={event['turn']} model={event['model']}")
+    elif t == "memory_extract_start":
+        print("◈ Extracting..")
+    elif t == "memory_extract_saved":
+        paths = ", ".join(event.get("paths") or [])
+        print(f"[◈ Memory Saved] {event.get('count', 0)} {paths}")
+    elif t == "memory_extract_skipped":
+        print(f"◈ Memory skipped: {event.get('reason')}")
+    elif t == "memory_extract_error":
+        print(f"◈ Memory error: {event.get('error')}", file=sys.stderr)
+    elif t == "memory_extract_trailing":
+        print(f"◈ Extracting.. {event.get('status')}")
+    elif t == "memory_load":
+        print(f"[◈ Memory Loaded] {event.get('count', 0)}")
     elif t == "turn_start":
         transition = event.get("transition") or "fresh"
         print(f"[turn {event['turn']}] start ({transition})")

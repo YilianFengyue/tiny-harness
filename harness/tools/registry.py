@@ -38,6 +38,7 @@ class ToolRuntimeState:
     persisted_results: dict[str, str] = field(default_factory=dict)
     permission_context: object | None = None
     permission_resolver: PermissionResolver | None = None
+    config: object | None = None
 
 
 @dataclass

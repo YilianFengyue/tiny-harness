@@ -1,0 +1,23 @@
+{
+  "model": "gpt-5.5",
+  "max_turns": 22,
+  "permissions": {
+    "mode": "acceptEdits",
+    "allow": [
+      "Bash(python -m pytest *)",
+      "Bash(python check.py)",
+      "Bash(pytest -q)"
+    ],
+    "deny": [
+      "Bash(rm *)",
+      "Bash(del *)",
+      "Write(.env)"
+    ],
+    "ask": []
+  },
+  "features": {
+    "settings_tui": true,
+    "app_state": true,
+    "coding_acceptance_trace": true
+  }
+}
