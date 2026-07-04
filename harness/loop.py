@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from .hooks import (
     evaluate_tool_permission,
     resolve_permission_decision,
 )
+from .lifecycle_hooks import dispatch_lifecycle_hooks, lifecycle_hook_events
 from .features import feature_snapshot
 from .memory import memory_summary, render_memory_prompt
 from .memory_extract import MemoryExtractionController
@@ -95,6 +97,7 @@ class AgentState:
     length_recovery_count: int = 0
     reactive_compact_attempted: bool = False
     reactive_summary_attempted: bool = False
+    stop_hook_attempted: bool = False
 
 
 def build_initial_messages(task: str, cfg: Config) -> list[dict]:
@@ -178,6 +181,27 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
     if mem_summary["count"]:
         yield {"type": "memory_load", **mem_summary}
 
+    prompt_result = dispatch_lifecycle_hooks(
+        "UserPromptSubmit",
+        {"prompt": task, "session_id": session_id},
+        cfg,
+    )
+    yield from lifecycle_hook_events(prompt_result, turn=0)
+    if prompt_result.blocked:
+        return TerminalState(
+            "hook_blocked", 0,
+            prompt_result.reason or "UserPromptSubmit hook blocked the request")
+    if prompt_result.updated_input:
+        updated_prompt = prompt_result.updated_input.get("prompt")
+        if isinstance(updated_prompt, str) and updated_prompt.strip():
+            _replace_latest_user_message(state.messages, updated_prompt)
+    if prompt_result.additional_context:
+        state.messages.append({
+            "role": "user",
+            "content": _hook_context_message("UserPromptSubmit",
+                                             prompt_result.additional_context),
+        })
+
     try:
         while state.turn < cfg.max_turns:
             if cancel_token:
@@ -210,6 +234,17 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                            "status": cm.status(state.messages).as_dict()}
                     compact_retries: list[dict] = []
                     try:
+                        pre_compact = dispatch_lifecycle_hooks(
+                            "PreCompact",
+                            {"trigger": "auto", "status": cm.status(state.messages).as_dict()},
+                            cfg,
+                        )
+                        yield from lifecycle_hook_events(pre_compact, turn=state.turn)
+                        if pre_compact.blocked:
+                            yield {"type": "auto_compact_skipped", "turn": state.turn,
+                                   "reason": "pre_compact_hook_blocked",
+                                   "hook_reason": pre_compact.reason}
+                            continue
                         result = compact_conversation(
                             state.messages, provider, cfg, trigger="auto",
                             on_retry=lambda attempt, status, err, sleep_s: compact_retries.append(
@@ -229,6 +264,12 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                         yield {"type": "auto_compact_saved", "turn": state.turn,
                                **result.as_event(),
                                "status": cm.status(state.messages).as_dict()}
+                        post_compact = dispatch_lifecycle_hooks(
+                            "PostCompact",
+                            {"trigger": "auto", **result.as_event()},
+                            cfg,
+                        )
+                        yield from lifecycle_hook_events(post_compact, turn=state.turn)
                         yield {"type": "context_status", "turn": state.turn,
                                **cm.status(state.messages).as_dict()}
                     except Exception as e:
@@ -377,6 +418,28 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                     continue
                 return TerminalState("truncated", state.turn, resp.content)
 
+            stop_result = dispatch_lifecycle_hooks(
+                "Stop",
+                {"final_message": resp.content, "turn": state.turn},
+                cfg,
+            )
+            yield from lifecycle_hook_events(stop_result, turn=state.turn)
+            if stop_result.blocked:
+                return TerminalState(
+                    "hook_stopped", state.turn,
+                    stop_result.reason or "Stop hook blocked completion")
+            if stop_result.updated_output is not None:
+                return TerminalState("completed", state.turn, stop_result.updated_output)
+            if stop_result.additional_context and not state.stop_hook_attempted:
+                state.stop_hook_attempted = True
+                state.messages.append({
+                    "role": "user",
+                    "content": _hook_context_message("Stop", stop_result.additional_context),
+                })
+                state.transition = ContinueDecision("stop_hook_blocking")
+                yield state.transition.as_event(state.turn)
+                continue
+
             return TerminalState("completed", state.turn, resp.content)
         return TerminalState("max_turns", state.turn)
     except KeyboardInterrupt:
@@ -475,7 +538,7 @@ def _run_tool_batch_events(batch: list[ToolCallRequest], tool_ctx: ToolContext,
                 raise CancelledError("tool execution interrupted")
 
     for tc, _ in prepared:
-        yield from _finish_tool_event(turn, tc, finished[tc.id], tool_ctx)
+        yield from _finish_tool_event(turn, tc, finished[tc.id], tool_ctx, cfg)
 
 
 def _preflight_tool_events(tc: ToolCallRequest, tool_ctx: ToolContext,
@@ -504,6 +567,32 @@ def _preflight_tool_events(tc: ToolCallRequest, tool_ctx: ToolContext,
             f"Unknown tool '{tc.name}'. Available tools: {available_tool_names()}.",
             ok=False, error_kind="unknown_tool")
         yield {"type": "tool_preflight_result", "result": result}
+        return
+
+    hook = dispatch_lifecycle_hooks(
+        "PreToolUse",
+        {"tool_name": spec.name, "tool_input": tc.arguments or {},
+         "tool_call_id": tc.id},
+        cfg,
+    )
+    yield from lifecycle_hook_events(hook, turn=turn, tool_call_id=tc.id,
+                                     name=spec.name)
+    if hook.updated_input is not None:
+        tc.arguments = dict(hook.updated_input)
+        tc.arguments_raw = json.dumps(tc.arguments, ensure_ascii=False)
+        yield {"type": "tool_input_updated", "turn": turn,
+               "tool_call_id": tc.id, "name": spec.name,
+               "arguments": tc.arguments, "source": "PreToolUse"}
+    if hook.additional_context:
+        tool_ctx.progress(
+            phase="hook_context",
+            message=_hook_context_message("PreToolUse", hook.additional_context),
+        )
+    if hook.blocked:
+        yield {"type": "tool_preflight_result",
+               "result": ToolResult(
+                   denial_message(spec.name, hook.reason or "blocked by PreToolUse hook"),
+                   ok=False, error_kind="hook_blocked")}
         return
 
     try:
@@ -552,7 +641,24 @@ def _drain_progress(progress_events: Queue[dict]):
 
 
 def _finish_tool_event(turn: int, tc: ToolCallRequest, r: ToolResult,
-                       tool_ctx: ToolContext):
+                       tool_ctx: ToolContext, cfg: Config):
+    hook_event = "PostToolUse" if r.ok else "PostToolUseFailure"
+    hook = dispatch_lifecycle_hooks(
+        hook_event,  # type: ignore[arg-type]
+        {"tool_name": tc.name, "tool_input": tc.arguments or {},
+         "tool_output": r.text, "ok": r.ok, "tool_call_id": tc.id},
+        cfg,
+    )
+    yield from lifecycle_hook_events(hook, turn=turn, tool_call_id=tc.id,
+                                     name=tc.name)
+    if hook.updated_output is not None:
+        r.text = hook.updated_output
+    elif hook.additional_context:
+        r.text = r.text + "\n\n" + _hook_context_message(hook_event, hook.additional_context)
+    if hook.blocked:
+        r.ok = False
+        r.error_kind = "hook_blocked"
+        r.text = denial_message(tc.name, hook.reason or f"blocked by {hook_event} hook")
     if r.persisted_path:
         yield {"type": "tool_result_persisted", "turn": turn,
                "tool_call_id": tc.id, "name": tc.name,
@@ -575,6 +681,17 @@ def _finish_tool_event(turn: int, tc: ToolCallRequest, r: ToolResult,
 def tool_message(tool_call_id: str, ok: bool, text: str) -> dict:
     content = text if (ok or text.startswith("ERROR:")) else f"ERROR: {text}"
     return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
+
+
+def _replace_latest_user_message(messages: list[dict], content: str) -> None:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            message["content"] = content
+            return
+
+
+def _hook_context_message(event: str, content: str) -> str:
+    return f"[{event} hook additional context]\n{content}"
 
 
 def build_resume_messages(events: list[dict]) -> list[dict]:

@@ -28,6 +28,8 @@ from .permissions import (
 )
 from .providers.base import Provider
 from .session import AgentSession
+from .session_store import list_workspace_sessions
+from .lifecycle_hooks import format_hooks_summary, hooks_status_line
 from .memory_view import (
     add_memory_from_text,
     extract_memory_for_session,
@@ -176,6 +178,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/build <n>", "open details for a build block"),
     ("/runs", "list recent run ids"),
     ("/memory [status|sources|prompt|tail|extract|on|off|list|read|add|forget|rebuild]", "manage persistent memory"),
+    ("/hooks", "show lifecycle hook status"),
     ("/settings [sources|effective|trust]", "show config snapshot"),
     ("/features", "show active feature flags"),
     ("/permissions", "show active permission mode and rules"),
@@ -195,6 +198,7 @@ TOOL_EVENT_TYPES = {
     "tool_permission_wait",
     "tool_permission_resolved",
     "tool_permission_update",
+    "tool_input_updated",
     "tool_start",
     "tool_progress",
     "tool_result_persisted",
@@ -704,7 +708,10 @@ if _TUI_IMPORT_ERROR is None:
             yield Footer()
 
         def on_mount(self) -> None:
-            self._new_session(resume_run_id=self.resume_run_id)
+            self._new_session(
+                resume_run_id=self.resume_run_id,
+                restore_workspace_latest=self.resume_run_id is None,
+            )
             self.set_interval(0.25, self._tick)
             self._refresh_all()
             self.query_one("#prompt", PromptInput).focus()
@@ -842,12 +849,21 @@ if _TUI_IMPORT_ERROR is None:
             prompt.result.put(choice)
             self._refresh_all()
 
-        def _new_session(self, resume_run_id: str | None = None) -> UiSession:
+        def _new_session(self, resume_run_id: str | None = None,
+                         restore_workspace_latest: bool = False) -> UiSession:
             sid = self.next_id
             self.next_id += 1
-            agent = (AgentSession.from_run(self.cfg, self.provider, resume_run_id)
-                     if resume_run_id else AgentSession.fresh(self.cfg, self.provider))
-            ui = UiSession(sid, f"Session {sid}", agent)
+            restored_from_workspace = False
+            if resume_run_id:
+                agent = AgentSession.from_run(self.cfg, self.provider, resume_run_id)
+            elif restore_workspace_latest:
+                agent = AgentSession.from_workspace_latest(self.cfg, self.provider)
+                restored_from_workspace = agent is not None
+                if agent is None:
+                    agent = AgentSession.fresh(self.cfg, self.provider)
+            else:
+                agent = AgentSession.fresh(self.cfg, self.provider)
+            ui = UiSession(sid, _session_title_from_messages(agent.messages, sid), agent)
             agent.permission_resolver = self._make_permission_resolver(sid)
             ui.records.append(UiRecord("system", "", "logo"))
             ui.records.append(UiRecord(
@@ -857,6 +873,13 @@ if _TUI_IMPORT_ERROR is None:
             ))
             if resume_run_id:
                 ui.records.append(UiRecord("system", f"resumed run {resume_run_id}", "system"))
+            elif restored_from_workspace:
+                ui.records.append(UiRecord(
+                    "system",
+                    f"restored workspace session {agent.session_id} from run {agent.last_run_id}",
+                    "system",
+                ))
+                ui.records.extend(_records_from_messages(agent.messages))
             self.sessions[sid] = ui
             self.current_id = sid
             return ui
@@ -1033,6 +1056,11 @@ if _TUI_IMPORT_ERROR is None:
                 ui.status = f"context compact error: {_compact(str(event.get('error') or ''), 60)}"
             elif kind == "auto_compact_circuit_open":
                 ui.status = "context compact circuit open"
+            elif kind == "hook_start":
+                ui.status = f"hook {event.get('hook_event')} running"
+            elif kind == "hook_end":
+                status = "blocked" if event.get("blocked") else ("ok" if event.get("ok") else "error")
+                ui.status = f"hook {event.get('hook_event')} {status}"
             elif kind == "stream_request_start":
                 ui.status = f"request turn={event.get('turn')} model={event.get('model')}"
             elif kind == "memory_load":
@@ -1103,6 +1131,9 @@ if _TUI_IMPORT_ERROR is None:
                 self.action_new_session()
                 return
             if name == "/sessions":
+                history = _format_workspace_sessions(self.cfg, self._current().agent)
+                if history:
+                    self._add_system(history)
                 self.push_screen(SessionPicker(self.sessions, self.current_id), self._switch_to_session)
                 return
             if name == "/rename":
@@ -1138,6 +1169,9 @@ if _TUI_IMPORT_ERROR is None:
                 return
             if name == "/memory":
                 self._add_system(_handle_memory_command(rest, self.cfg, self._current().agent))
+                return
+            if name == "/hooks":
+                self._add_system(format_hooks_summary(self.cfg))
                 return
             if name == "/settings":
                 self._add_system(format_settings_summary(self.cfg, rest))
@@ -1320,6 +1354,40 @@ def run_textual_tui(cfg: Config, provider: Provider,
     return 0
 
 
+def _records_from_messages(messages: list[dict]) -> list[UiRecord]:
+    records: list[UiRecord] = []
+    for message in messages:
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        records.append(UiRecord(str(role), content))
+    return records[-80:]
+
+
+def _session_title_from_messages(messages: list[dict], sid: int) -> str:
+    for message in messages:
+        if message.get("role") == "user":
+            content = str(message.get("content") or "").strip().replace("\n", " ")
+            if content:
+                return _compact(content, 30)
+    return f"Session {sid}"
+
+
+def _format_workspace_sessions(cfg: Config, current: AgentSession) -> str:
+    sessions = list_workspace_sessions(cfg.workdir)
+    if not sessions:
+        return ""
+    lines = ["Workspace history:"]
+    for item in sessions[:8]:
+        mark = "*" if item.session_id == current.session_id else " "
+        lines.append(
+            f"{mark} {item.title}  session={item.session_id}  run={item.last_run_id or '-'}")
+    return "\n".join(lines)
+
+
 def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolActivity | None:
     call_id = str(event.get("tool_call_id") or event.get("id") or "")
     if not call_id:
@@ -1367,6 +1435,9 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
             activity.ok = False
     elif t == "tool_permission_update":
         activity.permission_update = str(event.get("summary") or "")
+    elif t == "tool_input_updated":
+        activity.phase = "updated"
+        activity.arguments = event.get("arguments") or activity.arguments
     elif t == "tool_start":
         activity.phase = "running"
     elif t == "tool_progress":
@@ -1865,6 +1936,7 @@ def _footer_line(ui: UiSession, cfg: Config) -> str:
     total_tokens = sum(int(v) for v in tokens.values())
     return (
         f"{left} | {settings_status_line(cfg)} | {memory_status_line(cfg)} | "
+        f"{hooks_status_line(cfg)} | "
         f"{context_status_line(ui.agent.context_status())}    "
         f"{total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
         "ctrl+p commands | enter send | ctrl+j newline"

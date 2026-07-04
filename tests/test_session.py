@@ -1,6 +1,7 @@
 from conftest import MockProvider, turn
 
 from harness.session import AgentSession
+from harness.session_store import latest_workspace_session
 from harness.telemetry import read_trajectory
 import json
 
@@ -33,6 +34,44 @@ def test_session_preserves_history_across_submits(make_cfg):
     assert second_submit_request[-1]["content"] == "Continue from the previous result."
     assert second_submit_request[2]["tool_calls"][0]["id"] == "c1"
     assert "I listed the workspace." in second_submit_request[4]["content"]
+
+
+def test_workspace_latest_session_restores_history_after_restart(make_cfg):
+    cfg = make_cfg()
+    first_provider = MockProvider([turn(content="I remember this workspace.")])
+    first = AgentSession.fresh(cfg, first_provider)
+
+    first_turn = first.submit("Remember the project plan.")
+
+    stored = latest_workspace_session(cfg.workdir)
+    assert stored is not None
+    assert stored.session_id == first.session_id
+    assert stored.last_run_id == first_turn.run_id
+
+    second_provider = MockProvider([turn(content="Continuing with the plan.")])
+    restored = AgentSession.from_workspace_latest(cfg, second_provider)
+    assert restored is not None
+    assert restored.session_id == first.session_id
+    assert restored.last_run_id == first_turn.run_id
+
+    restored.submit("Continue from the previous message.")
+
+    request = second_provider.requests[0]
+    assert [m["role"] for m in request] == ["system", "user", "assistant", "user"]
+    assert request[1]["content"] == "Remember the project plan."
+    assert "I remember this workspace." in request[2]["content"]
+    assert request[-1]["content"] == "Continue from the previous message."
+
+
+def test_workspace_session_index_is_scoped_to_workdir(make_cfg, tmp_path):
+    cfg_a = make_cfg(workdir=tmp_path / "a")
+    cfg_b = make_cfg(workdir=tmp_path / "b", runs_dir=cfg_a.runs_dir)
+    provider = MockProvider([turn(content="A only")])
+    session = AgentSession.fresh(cfg_a, provider)
+
+    session.submit("Keep this in workspace A.")
+
+    assert AgentSession.from_workspace_latest(cfg_b, MockProvider([])) is None
 
 
 def test_session_captures_live_loop_events_and_trajectory(make_cfg):

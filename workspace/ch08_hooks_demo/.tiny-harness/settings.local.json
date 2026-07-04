@@ -1,0 +1,69 @@
+{
+  "hooksTrusted": true,
+  "permissions": {
+    "mode": "acceptEdits",
+    "allow": [
+      "Bash(python -m pytest*)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .tiny-harness/hooks/user_prompt_context.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash(python -m pytest*)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .tiny-harness/hooks/pytest_quiet.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .tiny-harness/hooks/protect_production_config.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .tiny-harness/hooks/audit_write.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .tiny-harness/hooks/require_acceptance.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

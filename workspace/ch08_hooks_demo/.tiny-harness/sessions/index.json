@@ -1,0 +1,14 @@
+{
+  "sessions": [
+    {
+      "session_id": "20260704-130627-a2ec27",
+      "workdir": "D:\\code\\ICEScode\\tiny-harness\\workspace\\ch08_hooks_demo",
+      "title": "修复这个项目的金额汇总 bug。要求：先看 README 和测试，修复后运行 python -m pytest，然后写 ACCEPTANCE.md 总结改动和测",
+      "last_run_id": "20260704-133116-4df3f4",
+      "created_at": "2026-07-04T13:23:06.757+00:00",
+      "updated_at": "2026-07-04T13:31:26.992+00:00",
+      "turns": 2,
+      "cost_usd": 0.211107
+    }
+  ]
+}

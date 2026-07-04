@@ -1,0 +1,2 @@
+ENV = "demo"
+ALLOW_LIVE_PAYMENTS = False

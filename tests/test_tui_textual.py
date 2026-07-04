@@ -88,12 +88,14 @@ def test_tui_slash_menu_includes_settings_and_features():
     settings = _command_matches("/set")
     features = _command_matches("/fea")
     memory = _command_matches("/mem")
+    hooks = _command_matches("/hoo")
     context = _command_matches("/con")
     compact = _command_matches("/com")
 
     assert settings and settings[0][0].startswith("/settings")
     assert features and features[0][0].startswith("/features")
     assert memory and memory[0][0].startswith("/memory")
+    assert hooks and hooks[0][0].startswith("/hooks")
     assert context and context[0][0].startswith("/context")
     assert compact and compact[0][0].startswith("/compact")
 

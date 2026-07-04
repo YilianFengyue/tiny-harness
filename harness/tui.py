@@ -17,6 +17,8 @@ from .permissions import (
 )
 from .providers.base import Provider
 from .session import AgentSession
+from .session_store import list_workspace_sessions
+from .lifecycle_hooks import format_hooks_summary, hooks_status_line
 from .memory_view import (
     add_memory_from_text,
     extract_memory_for_session,
@@ -36,9 +38,16 @@ from .context_view import (
 
 
 def run_tui(cfg: Config, provider: Provider, resume_run_id: str | None = None) -> int:
-    session = (AgentSession.from_run(cfg, provider, resume_run_id)
-               if resume_run_id else AgentSession.fresh(cfg, provider))
-    _banner(cfg, session, resume_run_id)
+    restored_run_id: str | None = None
+    if resume_run_id:
+        session = AgentSession.from_run(cfg, provider, resume_run_id)
+    else:
+        session = AgentSession.from_workspace_latest(cfg, provider)
+        if session is not None:
+            restored_run_id = session.last_run_id
+        else:
+            session = AgentSession.fresh(cfg, provider)
+    _banner(cfg, session, resume_run_id, restored_run_id)
     idle_interrupts = 0
 
     while True:
@@ -81,7 +90,8 @@ def run_tui(cfg: Config, provider: Provider, resume_run_id: str | None = None) -
             print(summary["final_message"])
 
 
-def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> None:
+def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None,
+            restored_run_id: str | None = None) -> None:
     print("=" * 64)
     print("TinyAgent ProMax TUI v1")
     print(f"session_id: {session.session_id}")
@@ -90,11 +100,14 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> No
     print(f"runs_dir:   {cfg.runs_dir}")
     print(f"settings:   {settings_status_line(cfg)}")
     print(f"memory:     {memory_status_line(cfg)}")
+    print(f"hooks:      {hooks_status_line(cfg)}")
     print(f"context:    {context_status_line(session.context_status())}")
     if resume_run_id:
         print(f"resumed:    {resume_run_id}")
+    elif restored_run_id:
+        print(f"restored:   {restored_run_id}")
     print("-" * 64)
-    print("Commands: /help  /context  /compact  /memory  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
+    print("Commands: /help  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /cost  /trace  /runs  /sessions  /exit")
     print("=" * 64)
 
 
@@ -110,8 +123,10 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print("  /compact [note]  Manually compact old tool results")
         print("  /trace  Print latest trajectory path and viewer URL")
         print("  /runs   List recent run ids in this runs directory")
+        print("  /sessions   List persisted chat sessions for this workspace")
         print("  /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
         print("          Add format: /memory add <type> <title> | <description> | <content>")
+        print("  /hooks  Show lifecycle hook status")
         print("  /settings [sources|effective|trust]  Show config snapshot")
         print("  /features  Show active feature flags")
         print("  /permissions  Show active permission mode/rules")
@@ -157,8 +172,14 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
             mark = " *" if p.name == session.last_run_id else "  "
             print(f"{mark} {p.name}")
         return False
+    if name == "/sessions":
+        print(_format_sessions(cfg, session))
+        return False
     if name == "/memory":
         _handle_memory_command(rest, cfg, session)
+        return False
+    if name == "/hooks":
+        print(format_hooks_summary(cfg))
         return False
     if name == "/settings":
         print(format_settings_summary(cfg, rest))
@@ -228,6 +249,19 @@ def _handle_memory_command(text: str, cfg: Config, session: AgentSession) -> Non
         print(format_memory_summary(cfg, name))
         return
     print("Usage: /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
+
+
+def _format_sessions(cfg: Config, current: AgentSession) -> str:
+    sessions = list_workspace_sessions(cfg.workdir)
+    if not sessions:
+        return "No persisted sessions for this workspace yet."
+    lines = ["Workspace sessions:"]
+    for item in sessions[:10]:
+        mark = "*" if item.session_id == current.session_id else " "
+        run = item.last_run_id or "-"
+        lines.append(
+            f"{mark} {item.title}  session={item.session_id}  run={run}  turns={item.turns}")
+    return "\n".join(lines)
 
 
 def _handle_rule_command(behavior: str, text: str, cfg: Config,
@@ -342,6 +376,14 @@ def _print_event(event: dict) -> None:
     elif t == "tool_permission_update":
         persisted = "persisted" if event.get("persisted") else "memory"
         print(f"[tool] permission update {persisted} {event.get('summary')}")
+    elif t == "tool_input_updated":
+        print(f"[tool] input updated by hook {event['name']} call_id={event['tool_call_id']}")
+    elif t == "hook_start":
+        print(f"[hook] start {event.get('hook_event')} source={event.get('source')}")
+    elif t == "hook_end":
+        status = "blocked" if event.get("blocked") else ("ok" if event.get("ok") else "error")
+        reason = f" reason={event.get('reason')}" if event.get("reason") else ""
+        print(f"[hook] end {event.get('hook_event')} {status}{reason}")
     elif t == "tool_start":
         print(f"[tool] start {event['name']} call_id={event['tool_call_id']}")
     elif t == "tool_progress":

@@ -22,6 +22,7 @@ from .loop import (
 )
 from .memory_extract import MemoryExtractionController
 from .providers.base import Provider
+from .session_store import latest_workspace_session, upsert_workspace_session
 from .state import AppState, Store, build_app_state, create_store
 from .telemetry import CostLedger, RunLogger, Usage, new_run_id, read_trajectory
 from .tools import ToolContext, openai_tool_schemas
@@ -73,7 +74,9 @@ class AgentSession:
     @classmethod
     def from_run(cls, cfg: Config, provider: Provider, run_id: str) -> "AgentSession":
         events = read_trajectory(cfg.runs_dir, run_id)
+        session_id = _session_id_from_events(events)
         session = cls(cfg=cfg, provider=provider,
+                      session_id=session_id or new_run_id(),
                       messages=build_resume_messages(events))
         if session.memory_controller:
             session.memory_controller.state.last_processed_index = len(session.messages)
@@ -85,6 +88,20 @@ class AgentSession:
                 session.cost_usd += float(e.get("cost_usd", 0.0))
                 session.pricing_unknown = session.pricing_unknown or bool(
                     e.get("pricing_unknown"))
+        return session
+
+    @classmethod
+    def from_workspace_latest(cls, cfg: Config, provider: Provider) -> "AgentSession | None":
+        stored = latest_workspace_session(cfg.workdir)
+        if not stored or not stored.last_run_id:
+            return None
+        try:
+            session = cls.from_run(cfg, provider, stored.last_run_id)
+        except Exception:
+            return None
+        session.session_id = stored.session_id or session.session_id
+        session.turns_submitted = stored.turns
+        session.cost_usd = max(session.cost_usd, stored.cost_usd)
         return session
 
     def submit(self, user_text: str, on_event: EventCallback | None = None) -> SessionTurn:
@@ -137,6 +154,7 @@ class AgentSession:
         self.cost_usd += float(summary["cost_usd"])
         self.pricing_unknown = self.pricing_unknown or bool(summary["pricing_unknown"])
         self.permission_context = tool_ctx.runtime.permission_context
+        self.persist_index()
         self._refresh_app_state(status=summary["reason"])
         return SessionTurn(run_id=logger.run_id, summary=summary, events=events)
 
@@ -210,6 +228,18 @@ class AgentSession:
             "pricing_unknown": self.pricing_unknown,
         }
 
+    def persist_index(self, title: str | None = None) -> None:
+        if not self.last_run_id:
+            return
+        upsert_workspace_session(
+            self.cfg.workdir,
+            session_id=self.session_id,
+            title=title or _title_from_messages(self.messages),
+            last_run_id=self.last_run_id,
+            turns=self.turns_submitted,
+            cost_usd=self.cost_usd,
+        )
+
     def _set_status(self, status: str) -> None:
         self._refresh_app_state(status=status)
 
@@ -235,6 +265,22 @@ def _usage_from_dict(raw: dict) -> Usage:
         completion_tokens=int(raw.get("completion_tokens", 0)),
         reasoning_tokens=int(raw.get("reasoning_tokens", 0)),
     )
+
+
+def _session_id_from_events(events: list[dict]) -> str | None:
+    for event in events:
+        if event.get("type") == "run_start" and event.get("session_id"):
+            return str(event["session_id"])
+    return None
+
+
+def _title_from_messages(messages: list[dict]) -> str:
+    for message in messages:
+        if message.get("role") == "user":
+            content = str(message.get("content") or "").strip().replace("\n", " ")
+            if content:
+                return content[:80]
+    return "Session"
 
 
 def _emit_memory_event(event: dict, events: list[dict],
