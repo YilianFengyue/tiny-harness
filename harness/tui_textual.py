@@ -44,6 +44,12 @@ from .settings_view import (
     managed_permission_rules_only,
     settings_status_line,
 )
+from .context_view import (
+    context_pill,
+    context_status_line,
+    format_compact_result,
+    format_context_summary,
+)
 
 try:  # pragma: no cover - UI smoke-tested with Textual's headless runner.
     from rich.console import Group
@@ -164,6 +170,8 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/drop", "close current session"),
     ("/clear", "clear visible transcript"),
     ("/cost", "show cumulative token and cost totals"),
+    ("/context", "show context budget and warning state"),
+    ("/compact [note]", "manually compact old tool results"),
     ("/trace", "show latest trajectory path and viewer URL"),
     ("/build <n>", "open details for a build block"),
     ("/runs", "list recent run ids"),
@@ -550,6 +558,14 @@ if _TUI_IMPORT_ERROR is None:
             background: #161b22;
         }
 
+        #context-pill {
+            height: 1;
+            padding: 0 2;
+            text-align: right;
+            color: #c9d1d9;
+            background: #0d1117;
+        }
+
         #prompt {
             height: 4;
             min-height: 3;
@@ -680,6 +696,7 @@ if _TUI_IMPORT_ERROR is None:
             yield Static(id="topbar")
             with VerticalScroll(id="transcript"):
                 yield TranscriptBody(id="transcript-body")
+            yield Static(id="context-pill")
             yield Static(id="statusline")
             yield CommandMenuBody(id="command-menu", classes="hidden")
             yield PromptInput(id="prompt")
@@ -1004,6 +1021,18 @@ if _TUI_IMPORT_ERROR is None:
                     ui.status = _activity_status(activity)
             elif kind == "context_edit":
                 ui.status = _compact(_format_context_edit(event), 90)
+            elif kind == "context_status":
+                ui.status = context_status_line(event)
+            elif kind == "auto_compact_start":
+                ui.status = f"compacting context: {event.get('trigger')}"
+            elif kind == "auto_compact_saved":
+                ui.status = (
+                    f"context summarized {event.get('messages_summarized', 0)} msgs"
+                )
+            elif kind == "auto_compact_error":
+                ui.status = f"context compact error: {_compact(str(event.get('error') or ''), 60)}"
+            elif kind == "auto_compact_circuit_open":
+                ui.status = "context compact circuit open"
             elif kind == "stream_request_start":
                 ui.status = f"request turn={event.get('turn')} model={event.get('model')}"
             elif kind == "memory_load":
@@ -1089,6 +1118,14 @@ if _TUI_IMPORT_ERROR is None:
                 return
             if name == "/cost":
                 self._add_system(_format_cost(self._current().agent.cumulative_summary()))
+                return
+            if name == "/context":
+                self._add_system(format_context_summary(self._current().agent.context_status()))
+                return
+            if name == "/compact":
+                current = self._current().agent
+                edit = current.compact_context(rest.strip())
+                self._add_system(format_compact_result(edit, current.context_status()))
                 return
             if name == "/trace":
                 self._add_system(_format_trace(self._current().agent.trajectory_path()))
@@ -1241,6 +1278,8 @@ if _TUI_IMPORT_ERROR is None:
             self.query_one("#topbar", Static).update(top)
             self.query_one("#statusline", Static).update(
                 f"{_status_dot(ui)} {ui.status}  |  run={ui.agent.last_run_id or '-'}")
+            self.query_one("#context-pill", Static).update(
+                context_pill(ui.agent.context_status()))
             self.query_one("#footerline", Static).update(
                 _footer_line(ui, self.cfg))
 
@@ -1825,7 +1864,8 @@ def _footer_line(ui: UiSession, cfg: Config) -> str:
     tokens = ui.agent.usage_total.as_dict()
     total_tokens = sum(int(v) for v in tokens.values())
     return (
-        f"{left} | {settings_status_line(cfg)} | {memory_status_line(cfg)}    "
+        f"{left} | {settings_status_line(cfg)} | {memory_status_line(cfg)} | "
+        f"{context_status_line(ui.agent.context_status())}    "
         f"{total_tokens:,} tokens | ${ui.agent.cost_usd:.4f}    "
         "ctrl+p commands | enter send | ctrl+j newline"
     )

@@ -30,6 +30,24 @@ class ReactiveProvider(Provider):
         return ModelTurn(content="recovered")
 
 
+class ReactiveSummaryProvider(Provider):
+    def __init__(self):
+        self.stream_calls = 0
+        self.complete_calls = 0
+
+    def complete(self, messages, tools, on_retry=None):
+        self.complete_calls += 1
+        return ModelTurn(
+            content="<analysis>draft</analysis><summary>Recovered summary.</summary>")
+
+    def stream(self, messages, tools, on_retry=None, cancel_token=None):
+        self.stream_calls += 1
+        if self.stream_calls == 1:
+            raise PromptTooLongError()
+        yield {"type": "assistant_delta", "content": "recovered"}
+        return ModelTurn(content="recovered")
+
+
 class CancelDuringStreamProvider(Provider):
     def complete(self, messages, tools, on_retry=None):
         raise AssertionError("stream path should be used")
@@ -84,6 +102,26 @@ def test_prompt_too_long_reactive_compact_retries(make_cfg, make_logger):
     assert any(e["type"] == "transition" and e["reason"] == "reactive_compact_retry"
                for e in events)
     assert any(e["type"] == "context_edit" and e["kind"] == "reactive_compact"
+               for e in events)
+
+
+def test_prompt_too_long_reactive_summary_compact_retries(make_cfg, make_logger):
+    cfg, logger = make_cfg(context_hard_limit=1_000_000), make_logger()
+    provider = ReactiveSummaryProvider()
+    messages = [{"role": "system", "content": "system"}]
+    for i in range(10):
+        messages.append({"role": "user", "content": f"message {i} " + "x" * 500})
+        messages.append({"role": "assistant", "content": f"answer {i}"})
+
+    summary = run_agent("continue", cfg, provider, logger, resume_messages=messages)
+    events = read_trajectory(cfg.runs_dir, logger.run_id)
+
+    assert summary["reason"] == "completed"
+    assert provider.complete_calls == 1
+    assert provider.stream_calls == 2
+    assert any(e["type"] == "auto_compact_saved" and e["trigger"] == "reactive"
+               for e in events)
+    assert any(e["type"] == "transition" and e["reason"] == "reactive_compact_retry"
                for e in events)
 
 

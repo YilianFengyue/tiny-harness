@@ -20,6 +20,7 @@ from queue import Empty, Queue
 import time
 
 from .cancel import CancelledError, CancellationToken
+from .compact import compact_conversation
 from .config import Config, load_pricing
 from .context import ContextManager, strip_internal_marks
 from .hooks import (
@@ -93,6 +94,7 @@ class AgentState:
     transition: ContinueDecision | None = None
     length_recovery_count: int = 0
     reactive_compact_attempted: bool = False
+    reactive_summary_attempted: bool = False
 
 
 def build_initial_messages(task: str, cfg: Config) -> list[dict]:
@@ -111,7 +113,8 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
     schemas = openai_tool_schemas()
     ledger = CostLedger(load_pricing())
     cm = ContextManager(cfg.context_budget, cfg.context_keep_recent,
-                        cfg.context_hard_limit, cfg.tool_result_budget_chars)
+                        cfg.context_hard_limit, cfg.tool_result_budget_chars,
+                        cfg.max_completion_tokens or 20_000)
     tool_ctx = ToolContext(cfg.workdir, cfg.bash_timeout, cfg.tool_output_limit)
     tool_ctx.runtime.config = cfg
 
@@ -170,6 +173,7 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
         ] if settings_snapshot else [],
         "features": feature_snapshot(cfg),
         "memory": mem_summary,
+        "context": cm.status(state.messages).as_dict(),
     }
     if mem_summary["count"]:
         yield {"type": "memory_load", **mem_summary}
@@ -185,12 +189,57 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
             yield {"type": "turn_start", "turn": state.turn,
                    "transition": state.transition.reason if state.transition else None,
                    "n_messages": len(state.messages)}
+            yield {"type": "context_status", "turn": state.turn,
+                   **cm.status(state.messages).as_dict()}
 
             for edit in (cm.budget_tool_results(state.messages),
                          cm.maybe_compact(state.messages)):
                 if edit:
                     yield {"type": "context_edit", "turn": state.turn,
-                           "prompt_tokens_before": cm.last_prompt_tokens, **edit}
+                           "prompt_tokens_before": cm.last_prompt_tokens, **edit,
+                           "status": cm.status(state.messages).as_dict()}
+
+            if cm.should_summary_compact(state.messages):
+                if cm.consecutive_auto_compact_failures >= 3:
+                    yield {"type": "auto_compact_skipped", "turn": state.turn,
+                           "reason": "circuit_open",
+                           "failures": cm.consecutive_auto_compact_failures}
+                else:
+                    yield {"type": "auto_compact_start", "turn": state.turn,
+                           "trigger": "auto",
+                           "status": cm.status(state.messages).as_dict()}
+                    compact_retries: list[dict] = []
+                    try:
+                        result = compact_conversation(
+                            state.messages, provider, cfg, trigger="auto",
+                            on_retry=lambda attempt, status, err, sleep_s: compact_retries.append(
+                                {"type": "retry", "turn": state.turn,
+                                 "attempt": attempt, "status": status,
+                                 "error": err[:500], "sleep_s": sleep_s,
+                                 "source": "auto_compact"}))
+                        for retry_event in compact_retries:
+                            yield retry_event
+                        if result.usage:
+                            ledger.record(cfg.model, result.usage)  # type: ignore[arg-type]
+                        cm.record_auto_compact_success()
+                        cm.last_prompt_tokens = result.post_tokens
+                        cm.last_compact_kind = "auto_compact"
+                        yield {"type": "compact_boundary", "turn": state.turn,
+                               **result.as_event()}
+                        yield {"type": "auto_compact_saved", "turn": state.turn,
+                               **result.as_event(),
+                               "status": cm.status(state.messages).as_dict()}
+                        yield {"type": "context_status", "turn": state.turn,
+                               **cm.status(state.messages).as_dict()}
+                    except Exception as e:
+                        for retry_event in compact_retries:
+                            yield retry_event
+                        failures = cm.record_auto_compact_failure()
+                        yield {"type": "auto_compact_error", "turn": state.turn,
+                               "error": str(e)[:1000], "failures": failures}
+                        if failures >= 3:
+                            yield {"type": "auto_compact_circuit_open",
+                                   "turn": state.turn, "failures": failures}
 
             hard = cm.hard_limit_exceeded(state.messages)
             if hard:
@@ -244,16 +293,50 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                     if edit:
                         state.reactive_compact_attempted = True
                         yield {"type": "context_edit", "turn": state.turn,
-                               "prompt_tokens_before": cm.last_prompt_tokens, **edit}
+                               "prompt_tokens_before": cm.last_prompt_tokens, **edit,
+                               "status": cm.status(state.messages).as_dict()}
                         state.transition = ContinueDecision(
                             "reactive_compact_retry", {"error": str(e)[:500]})
                         yield state.transition.as_event(state.turn)
                         continue
+                    if not state.reactive_summary_attempted:
+                        yield {"type": "auto_compact_start", "turn": state.turn,
+                               "trigger": "reactive",
+                               "status": cm.status(state.messages).as_dict()}
+                        try:
+                            result = compact_conversation(
+                                state.messages, provider, cfg, trigger="reactive",
+                                custom_instructions=(
+                                    "Emergency prompt-too-long recovery. Preserve the current "
+                                    "task, files, commands, errors, and exact next step."))
+                            if result.usage:
+                                ledger.record(cfg.model, result.usage)  # type: ignore[arg-type]
+                            cm.record_auto_compact_success()
+                            cm.last_prompt_tokens = result.post_tokens
+                            cm.last_compact_kind = "reactive_summary_compact"
+                            state.reactive_summary_attempted = True
+                            yield {"type": "compact_boundary", "turn": state.turn,
+                                   **result.as_event()}
+                            yield {"type": "auto_compact_saved", "turn": state.turn,
+                                   **result.as_event(),
+                                   "status": cm.status(state.messages).as_dict()}
+                            state.transition = ContinueDecision(
+                                "reactive_compact_retry", {"error": str(e)[:500]})
+                            yield state.transition.as_event(state.turn)
+                            continue
+                        except Exception as compact_error:
+                            failures = cm.record_auto_compact_failure()
+                            yield {"type": "auto_compact_error", "turn": state.turn,
+                                   "trigger": "reactive",
+                                   "error": str(compact_error)[:1000],
+                                   "failures": failures}
                     return TerminalState("prompt_too_long", state.turn, str(e)[:1000])
                 raise
 
             cost = ledger.record(cfg.model, resp.usage)
             cm.observe(resp.usage.prompt_tokens)
+            yield {"type": "context_status", "turn": state.turn,
+                   **cm.status(state.messages).as_dict()}
             yield {"type": "llm_response", "turn": state.turn,
                    "finish_reason": resp.finish_reason, "content": resp.content,
                    "tool_calls": [{"id": tc.id, "name": tc.name,

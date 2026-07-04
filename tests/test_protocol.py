@@ -139,12 +139,14 @@ def test_trajectory_is_complete_and_ordered(make_cfg, make_logger):
     events = read_trajectory(runs_dir, run_id)
     types = [e["type"] for e in events]
     assert types == ["run_start",
-                     "turn_start", "llm_request", "stream_request_start",
-                     "llm_response", "tool_call", "tool_queued",
+                     "turn_start", "context_status",
+                     "llm_request", "stream_request_start",
+                     "context_status", "llm_response", "tool_call", "tool_queued",
                      "tool_validate", "tool_permission", "tool_start",
                      "tool_progress", "tool_result", "tool_end", "transition",
-                     "turn_start", "llm_request", "stream_request_start",
-                     "assistant_delta", "llm_response", "run_end"]
+                     "turn_start", "context_status",
+                     "llm_request", "stream_request_start",
+                     "assistant_delta", "context_status", "llm_response", "run_end"]
     assert all(e["run_id"] == run_id for e in events)
     assert [e["step"] for e in events] == list(range(len(events)))
     transitions = [e for e in events if e["type"] == "transition"]

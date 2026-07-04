@@ -28,6 +28,11 @@ from .memory_view import (
     rebuild_memory_index_for_cfg,
 )
 from .settings_view import format_features, format_settings_summary, settings_status_line
+from .context_view import (
+    context_status_line,
+    format_compact_result,
+    format_context_summary,
+)
 
 
 def run_tui(cfg: Config, provider: Provider, resume_run_id: str | None = None) -> int:
@@ -85,10 +90,11 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None) -> No
     print(f"runs_dir:   {cfg.runs_dir}")
     print(f"settings:   {settings_status_line(cfg)}")
     print(f"memory:     {memory_status_line(cfg)}")
+    print(f"context:    {context_status_line(session.context_status())}")
     if resume_run_id:
         print(f"resumed:    {resume_run_id}")
     print("-" * 64)
-    print("Commands: /help  /memory  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
+    print("Commands: /help  /context  /compact  /memory  /settings  /features  /permissions  /cost  /trace  /runs  /exit")
     print("=" * 64)
 
 
@@ -100,6 +106,8 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
     if name == "/help":
         print("Commands:")
         print("  /cost   Show cumulative session token/cost totals")
+        print("  /context  Show current context budget and warning state")
+        print("  /compact [note]  Manually compact old tool results")
         print("  /trace  Print latest trajectory path and viewer URL")
         print("  /runs   List recent run ids in this runs directory")
         print("  /memory [status|sources|prompt|tail|extract|on|off|list [type]|read <id>|add ...|forget <id>|rebuild]")
@@ -121,6 +129,13 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print(f"tokens input={u['prompt_tokens']} cached={u['cached_tokens']} "
               f"output={u['completion_tokens']} reasoning={u['reasoning_tokens']}")
         print(f"last_run_id={s['last_run_id']}")
+        return False
+    if name == "/context":
+        print(format_context_summary(session.context_status()))
+        return False
+    if name == "/compact":
+        edit = session.compact_context(rest.strip())
+        print(format_compact_result(edit, session.context_status()))
         return False
     if name == "/trace":
         path = session.trajectory_path()
@@ -356,6 +371,19 @@ def _print_event(event: dict) -> None:
     elif t == "context_edit":
         print(f"[context] cleared={event.get('cleared_messages')} "
               f"freed~={event.get('est_tokens_freed')} tokens")
+    elif t == "context_status":
+        print(f"[context] {context_status_line(event)}")
+    elif t == "auto_compact_start":
+        print(f"[context] compact start trigger={event.get('trigger')}")
+    elif t == "auto_compact_saved":
+        print(f"[context] summarized={event.get('messages_summarized')} "
+              f"kept={event.get('messages_kept')} "
+              f"tokens={event.get('pre_tokens')}->{event.get('post_tokens')}")
+    elif t == "auto_compact_error":
+        print(f"[context] compact error failures={event.get('failures')} "
+              f"{event.get('error')}")
+    elif t == "auto_compact_circuit_open":
+        print(f"[context] compact circuit open failures={event.get('failures')}")
     elif t == "retry":
         print(f"[retry] attempt={event['attempt']} status={event.get('status')} "
               f"sleep={event.get('sleep_s')}s")

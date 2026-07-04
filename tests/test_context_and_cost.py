@@ -33,6 +33,26 @@ def test_compact_noop_under_budget_and_skips_short():
     assert cm.maybe_compact(messages) is None      # 超预算但全是短消息，清了无意义
 
 
+def test_context_budget_state_thresholds():
+    cm = ContextManager(
+        budget_tokens=50_000,
+        keep_recent=1,
+        hard_limit_tokens=100_000,
+        reserved_output_tokens=2_000,
+    )
+    messages = [{"role": "user", "content": "x" * 800}]
+
+    state = cm.status(messages)
+    assert state.effective_window_tokens == 98_000
+    assert state.auto_compact_threshold == 50_000
+    assert state.level == "safe"
+
+    cm.observe(51_000)
+    state = cm.status(messages)
+    assert state.level == "auto_compact"
+    assert state.is_above_auto_compact_threshold is True
+
+
 def test_loop_emits_context_edit_event(make_cfg, make_logger):
     """真实 usage 推高水位 → 下一轮触发清理并写 context_edit 事件。"""
     cfg = make_cfg(context_budget=500, context_keep_recent=1)
@@ -48,12 +68,42 @@ def test_loop_emits_context_edit_event(make_cfg, make_logger):
     assert s["reason"] == "completed"
     events = read_trajectory(runs_dir, run_id)
     edits = [e for e in events if e["type"] == "context_edit"]
+    statuses = [e for e in events if e["type"] == "context_status"]
     assert len(edits) >= 1
+    assert statuses
+    assert any(e["level"] in {"safe", "warning", "auto_compact", "blocking"}
+               for e in statuses)
     # 清理在发给模型的消息里生效：第三次请求中第一条 tool 消息已是占位符
     third_req = [e for e in events if e["type"] == "llm_request"][2]
     tool_contents = [m["content"] for m in third_req["messages"] if m["role"] == "tool"]
     assert any("cleared to save context" in c for c in tool_contents)
     assert not any(m.get("_cleared") for m in third_req["messages"])  # 内部标记不上线
+
+
+def test_loop_auto_summary_compacts_near_effective_window(make_cfg, make_logger):
+    cfg = make_cfg(context_hard_limit=60_000, max_completion_tokens=1_000)
+    logger = make_logger()
+    provider = MockProvider([
+        turn(content="<analysis>x</analysis><summary>Large history summarized.</summary>",
+             prompt_tokens=50_000),
+        turn(content="done", prompt_tokens=2_000),
+    ])
+    messages = [{"role": "system", "content": "system"}]
+    for i in range(12):
+        messages.append({"role": "user", "content": "u" * 16_000 + str(i)})
+        messages.append({"role": "assistant", "content": f"assistant {i}"})
+
+    summary = run_agent("continue", cfg, provider, logger, resume_messages=messages)
+    events = read_trajectory(cfg.runs_dir, logger.run_id)
+
+    assert summary["reason"] == "completed"
+    assert any(e["type"] == "auto_compact_start" and e["trigger"] == "auto"
+               for e in events)
+    assert any(e["type"] == "auto_compact_saved" for e in events)
+    request = [e for e in events if e["type"] == "llm_request"][0]
+    assert any("Large history summarized" in (m.get("content") or "")
+               for m in request["messages"])
+    assert not any(m.get("_kind") for m in request["messages"])
 
 
 def test_cost_formula_with_cache():

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from .cancel import CancellationToken
+from .compact import compact_conversation
 from .config import Config, load_pricing
 from .context import ContextManager
 from .loop import (
@@ -51,14 +52,18 @@ class AgentSession:
     permission_context: object | None = None
     app_state: Store[AppState] | None = None
     memory_controller: MemoryExtractionController | None = None
+    context_manager: ContextManager | None = None
 
     def __post_init__(self) -> None:
         if self.memory_controller is None:
             self.memory_controller = MemoryExtractionController(self.cfg)
+        if self.context_manager is None:
+            self.context_manager = _make_context_manager(self.cfg)
         if self.app_state is None:
             self.app_state = create_store(build_app_state(
                 self.cfg, permission_context=self.permission_context,
-                memory_runtime=self.memory_controller.status()))
+                memory_runtime=self.memory_controller.status(),
+                context_runtime=self.context_status()))
 
     @classmethod
     def fresh(cls, cfg: Config, provider: Provider) -> "AgentSession":
@@ -89,9 +94,8 @@ class AgentSession:
         self._set_status("running")
 
         ledger = CostLedger(load_pricing())
-        cm = ContextManager(self.cfg.context_budget, self.cfg.context_keep_recent,
-                            self.cfg.context_hard_limit,
-                            self.cfg.tool_result_budget_chars)
+        cm = self.context_manager or _make_context_manager(self.cfg)
+        self.context_manager = cm
         tool_ctx = ToolContext(self.cfg.workdir, self.cfg.bash_timeout,
                                self.cfg.tool_output_limit)
         tool_ctx.runtime.config = self.cfg
@@ -148,6 +152,45 @@ class AgentSession:
         self.memory_controller.set_enabled(enabled)
         self._refresh_app_state()
 
+    def context_status(self) -> dict[str, object]:
+        cm = self.context_manager or _make_context_manager(self.cfg)
+        self.context_manager = cm
+        return cm.status(self.messages).as_dict()
+
+    def compact_context(self, note: str = "", summarize: bool = True) -> dict | None:
+        cm = self.context_manager or _make_context_manager(self.cfg)
+        self.context_manager = cm
+        if summarize:
+            try:
+                result = compact_conversation(
+                    self.messages, self.provider, self.cfg,
+                    trigger="manual", custom_instructions=note)
+                if result.usage:
+                    ledger = CostLedger(load_pricing())
+                    cost = ledger.record(self.cfg.model, result.usage)  # type: ignore[arg-type]
+                    self.usage_total.add(result.usage)  # type: ignore[arg-type]
+                    self.cost_usd += cost
+                    self.pricing_unknown = self.pricing_unknown or ledger.pricing_unknown
+                cm.record_auto_compact_success()
+                cm.last_prompt_tokens = result.post_tokens
+                cm.last_compact_kind = "manual_summary_compact"
+                self._refresh_app_state()
+                return {
+                    "kind": "manual_summary_compact",
+                    **result.as_event(),
+                    "summary": result.summary,
+                    "status": self.context_status(),
+                }
+            except Exception as exc:
+                edit = cm.manual_compact(self.messages, note=note)
+                if edit is not None:
+                    edit["summary_error"] = str(exc)
+                self._refresh_app_state()
+                return edit
+        edit = cm.manual_compact(self.messages, note=note)
+        self._refresh_app_state()
+        return edit
+
     def cancel_current(self) -> None:
         self.cancel_token.cancel()
         self._set_status("cancelled")
@@ -175,12 +218,14 @@ class AgentSession:
             self.app_state = create_store(build_app_state(
                 self.cfg, permission_context=self.permission_context, status=status,
                 memory_runtime=(
-                    self.memory_controller.status() if self.memory_controller else None)))
+                    self.memory_controller.status() if self.memory_controller else None),
+                context_runtime=self.context_status()))
             return
         self.app_state.set_state(lambda _prev: build_app_state(
             self.cfg, permission_context=self.permission_context, status=status,
             memory_runtime=(
-                self.memory_controller.status() if self.memory_controller else None)))
+                self.memory_controller.status() if self.memory_controller else None),
+            context_runtime=self.context_status()))
 
 
 def _usage_from_dict(raw: dict) -> Usage:
@@ -200,3 +245,14 @@ def _emit_memory_event(event: dict, events: list[dict],
         on_event(dict(payload))
     type_ = payload.pop("type")
     logger.emit(type_, **payload)
+
+
+def _make_context_manager(cfg: Config) -> ContextManager:
+    reserved = cfg.max_completion_tokens or 20_000
+    return ContextManager(
+        cfg.context_budget,
+        cfg.context_keep_recent,
+        cfg.context_hard_limit,
+        cfg.tool_result_budget_chars,
+        reserved,
+    )

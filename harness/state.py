@@ -58,12 +58,14 @@ class AppState:
     settings_policy_origin: str | None = None
     features: dict[str, object] = field(default_factory=dict)
     memory: dict[str, object] = field(default_factory=dict)
+    context: dict[str, object] = field(default_factory=dict)
     permission_context: object | None = None
 
 
 def build_app_state(cfg, *, permission_context: object | None = None,
                     status: str = "ready",
-                    memory_runtime: dict[str, object] | None = None) -> AppState:
+                    memory_runtime: dict[str, object] | None = None,
+                    context_runtime: dict[str, object] | None = None) -> AppState:
     snapshot = getattr(cfg, "settings_snapshot", None)
     sources = tuple(layer.source for layer in snapshot.sources) if snapshot else ()
     policy_origin = snapshot.policy_origin if snapshot else None
@@ -77,5 +79,6 @@ def build_app_state(cfg, *, permission_context: object | None = None,
         settings_policy_origin=policy_origin,
         features=feature_snapshot(cfg),
         memory=memory,
+        context=context_runtime or {},
         permission_context=permission_context,
     )

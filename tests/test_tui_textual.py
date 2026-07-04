@@ -8,6 +8,7 @@ from harness.tui_textual import (
     _render_build_activity,
     _render_permission_request,
 )
+from harness.context_view import context_pill
 
 
 def test_tui_folds_tool_lifecycle_into_single_activity():
@@ -87,10 +88,21 @@ def test_tui_slash_menu_includes_settings_and_features():
     settings = _command_matches("/set")
     features = _command_matches("/fea")
     memory = _command_matches("/mem")
+    context = _command_matches("/con")
+    compact = _command_matches("/com")
 
     assert settings and settings[0][0].startswith("/settings")
     assert features and features[0][0].startswith("/features")
     assert memory and memory[0][0].startswith("/memory")
+    assert context and context[0][0].startswith("/context")
+    assert compact and compact[0][0].startswith("/compact")
+
+
+def test_context_pill_renders_circle_percentage():
+    rendered = context_pill({"level": "warning", "percent_used": 87})
+
+    assert rendered.startswith("◐ context")
+    assert "87%" in rendered
 
 
 def test_build_activity_collects_thinking_and_tool_refs():

@@ -54,8 +54,55 @@ def test_session_captures_live_loop_events_and_trajectory(make_cfg):
     events = read_trajectory(cfg.runs_dir, result.run_id)
     assert events[0]["session_id"] == session.session_id
     assert any(e["type"] == "turn_start" for e in events)
+    assert any(e["type"] == "context_status" for e in events)
     assert any(e["type"] == "transition" and e["reason"] == "next_turn"
                for e in events)
+
+
+def test_session_keeps_context_manager_and_manual_compacts(make_cfg):
+    cfg = make_cfg(context_keep_recent=1)
+    provider = MockProvider([turn(content="ok")])
+    session = AgentSession.fresh(cfg, provider)
+    manager_id = id(session.context_manager)
+    session.messages.extend([
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "A" * 1000},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c2", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c2", "content": "B" * 1000},
+    ])
+
+    edit = session.compact_context("keep latest file result", summarize=False)
+
+    assert id(session.context_manager) == manager_id
+    assert edit and edit["kind"] == "manual_compact"
+    assert edit["cleared_messages"] == 1
+    assert "manually compacted" in session.messages[-3]["content"]
+    assert session.messages[-1]["content"] == "B" * 1000
+    assert session.app_state.get_state().context["last_compact_kind"] == "manual_compact"
+
+
+def test_session_manual_summary_compact_updates_state(make_cfg):
+    cfg = make_cfg()
+    provider = MockProvider([
+        turn(content="<analysis>draft</analysis><summary>Keep Decimal decision.</summary>")
+    ])
+    session = AgentSession.fresh(cfg, provider)
+    for i in range(10):
+        session.messages.append({"role": "user", "content": f"user {i}"})
+        session.messages.append({"role": "assistant", "content": f"assistant {i}"})
+
+    edit = session.compact_context("preserve Decimal rule")
+
+    assert edit and edit["kind"] == "manual_summary_compact"
+    assert "Keep Decimal decision" in session.messages[2]["content"]
+    assert session.context_status()["last_compact_kind"] == "manual_summary_compact"
+    assert session.usage_total.completion_tokens == 50
 
 
 def test_session_app_state_and_run_start_include_settings_features(make_cfg, tmp_path):
