@@ -100,6 +100,8 @@ class ToolActivity:
     agent_status: str | None = None
     agent_run_id: str | None = None
     agent_trajectory_path: str | None = None
+    agent_background: bool = False
+    agent_fork: bool = False
     audit: list[dict] = field(default_factory=list)
 
 
@@ -192,6 +194,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/deny <rule> [session|local|project]", "add a deny rule"),
     ("/ask <rule> [session|local|project]", "add an ask rule"),
     ("/mode <mode> [session|local|project]", "set permission mode"),
+    ("/auto_mode [on|off|full|status]", "toggle automatic approval mode"),
     ("/theme", "choose a theme"),
     ("/exit", "quit"),
 )
@@ -413,17 +416,25 @@ if _TUI_IMPORT_ERROR is None:
     class BuildDetailScreen(ModalScreen[None]):
         BINDINGS = [
             Binding("escape", "app.pop_screen", "Parent", show=True),
-            Binding("left", "prev_tool", "Prev", show=True),
-            Binding("right", "next_tool", "Next", show=True),
+            Binding("left", "prev_build", "Prev Build", show=True),
+            Binding("right", "next_build", "Next Build", show=True),
             Binding("pageup", "page_up", "PgUp", show=False),
             Binding("pagedown", "page_down", "PgDn", show=False),
         ]
 
-        def __init__(self, build: BuildActivity, activities: dict[str, ToolActivity]) -> None:
+        def __init__(self, builds: list[BuildActivity], build_index: int,
+                     activities: dict[str, ToolActivity]) -> None:
             super().__init__()
-            self.build = build
+            self.builds = builds
+            self.build_index = max(0, min(build_index, len(builds) - 1)) if builds else -1
             self.activities = activities
-            self.tool_index = 0 if build.tool_ids else -1
+            self.tool_index = 0 if self.build and self.build.tool_ids else -1
+
+        @property
+        def build(self) -> BuildActivity | None:
+            if self.build_index < 0 or self.build_index >= len(self.builds):
+                return None
+            return self.builds[self.build_index]
 
         def compose(self) -> ComposeResult:
             yield Vertical(
@@ -442,15 +453,19 @@ if _TUI_IMPORT_ERROR is None:
         def on_mount(self) -> None:
             self._refresh()
 
-        def action_prev_tool(self) -> None:
-            if self.build.tool_ids:
-                self.tool_index = (self.tool_index - 1) % len(self.build.tool_ids)
-                self._refresh()
+        def action_prev_build(self) -> None:
+            self._switch_build(-1)
 
-        def action_next_tool(self) -> None:
-            if self.build.tool_ids:
-                self.tool_index = (self.tool_index + 1) % len(self.build.tool_ids)
-                self._refresh()
+        def action_next_build(self) -> None:
+            self._switch_build(1)
+
+        def _switch_build(self, direction: int) -> None:
+            if not self.builds:
+                return
+            self.build_index = (self.build_index + direction) % len(self.builds)
+            build = self.build
+            self.tool_index = 0 if build and build.tool_ids else -1
+            self._refresh()
 
         def action_page_up(self) -> None:
             self.query_one("#build-detail-scroll", VerticalScroll).scroll_page_up(animate=False)
@@ -475,12 +490,24 @@ if _TUI_IMPORT_ERROR is None:
                 self._refresh()
 
         def _refresh(self) -> None:
+            build = self.build
+            if build is None:
+                empty = Text("No build selected.", style="dim")
+                self.query_one("#build-detail-title", Static).update(empty)
+                self.query_one("#build-detail-body", TranscriptBody).update(empty)
+                self.query_one("#build-detail-footer", Static).update(empty)
+                return
+            options = _build_tool_options(build, self.activities)
+            option_list = self.query_one("#build-tool-list", OptionList)
+            option_list.clear_options()
+            option_list.add_options(options)
             self.query_one("#build-detail-title", Static).update(
-                _render_build_detail_title(self.build))
+                _render_build_detail_title(build, self.build_index, len(self.builds)))
             self.query_one("#build-detail-body", TranscriptBody).update(
-                _render_build_detail(self.build, self.activities, self.tool_index))
+                _render_build_detail(build, self.activities, self.tool_index))
             self.query_one("#build-detail-footer", Static).update(
-                _render_build_detail_footer(self.build, self.tool_index))
+                _render_build_detail_footer(build, self.tool_index,
+                                            self.build_index, len(self.builds)))
 
 
     class SessionPicker(ModalScreen[int | None]):
@@ -778,7 +805,8 @@ if _TUI_IMPORT_ERROR is None:
             ui = self._current()
             build = _latest_build(ui)
             if build:
-                self.push_screen(BuildDetailScreen(build, ui.activities))
+                self.push_screen(BuildDetailScreen(ui.builds, _build_index(ui.builds, build),
+                                                   ui.activities))
             else:
                 self.push_screen(VerboseScreen(ui.audit_events))
 
@@ -795,6 +823,18 @@ if _TUI_IMPORT_ERROR is None:
                 if start <= line <= end:
                     self._open_build_by_id(build_id)
                     return
+            if len(self.build_click_zones) == 1:
+                self._open_build_by_id(self.build_click_zones[0][2])
+                return
+            nearest = None
+            nearest_distance = 999_999
+            for start, end, build_id in self.build_click_zones:
+                distance = min(abs(line - start), abs(line - end))
+                if distance < nearest_distance:
+                    nearest = build_id
+                    nearest_distance = distance
+            if nearest is not None and nearest_distance <= 8:
+                self._open_build_by_id(nearest)
 
         def action_transcript_page_up(self) -> None:
             self.query_one("#transcript", VerticalScroll).scroll_page_up(animate=False)
@@ -1206,6 +1246,9 @@ if _TUI_IMPORT_ERROR is None:
             if name == "/mode":
                 self._handle_mode_command(rest)
                 return
+            if name == "/auto_mode":
+                self._handle_auto_mode_command(rest)
+                return
             self._add_system(f"Unknown command: {name}. Try /help.")
 
         def _open_build_command(self, text: str) -> None:
@@ -1224,7 +1267,8 @@ if _TUI_IMPORT_ERROR is None:
             if not build:
                 self._add_system("No matching build block. Try /build 1.")
                 return
-            self.push_screen(BuildDetailScreen(build, ui.activities))
+            self.push_screen(BuildDetailScreen(ui.builds, _build_index(ui.builds, build),
+                                               ui.activities))
 
         def _run_palette_command(self, command: str | None) -> None:
             if command:
@@ -1304,6 +1348,31 @@ if _TUI_IMPORT_ERROR is None:
                 persist_permission_updates(self.cfg.workdir, (update,))
             self._add_system(summarize_permission_update(update) + "\n\n" + format_permission_context(context))
 
+        def _handle_auto_mode_command(self, text: str) -> None:
+            raw = (text.strip() or "status").lower()
+            if raw in {"status", "?"}:
+                self._add_system(_format_auto_mode_status(self.cfg))
+                return
+            if raw in {"on", "true", "1"}:
+                mode, yolo = "bypass", False
+            elif raw == "full":
+                mode, yolo = "bypass", True
+            elif raw in {"off", "false", "0"}:
+                mode, yolo = "default", False
+            else:
+                self._add_system("Usage: /auto_mode [on|off|full|status]")
+                return
+            update = PermissionUpdate("setMode", "session", mode=mode)
+            current = self._current()
+            base_context = current.agent.permission_context or load_permission_context(
+                self.cfg.workdir, _mode_override(self.cfg),
+                settings_snapshot=self.cfg.settings_snapshot)
+            context = apply_permission_update(base_context, update)
+            current.agent.permission_context = context
+            self.cfg.permission_mode = mode
+            self.cfg.yolo = yolo
+            self._add_system(_format_auto_mode_status(self.cfg) + "\n\n" + format_permission_context(context))
+
         def _apply_theme(self, theme: str | None) -> None:
             if theme:
                 self.theme = theme
@@ -1345,7 +1414,7 @@ if _TUI_IMPORT_ERROR is None:
                     build = record.meta.get("build")
                     if isinstance(build, BuildActivity):
                         line_count = _renderable_line_count(renderable)
-                        self.build_click_zones.append((line, line + line_count, build.id))
+                        self.build_click_zones.append((max(0, line - 1), line + line_count + 2, build.id))
                 renderables.append(renderable)
                 renderables.append(Text(""))
                 line += _renderable_line_count(renderable) + 1
@@ -1483,10 +1552,12 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
         activity.agent_id = str(event.get("agent_id") or "")
         activity.agent_type = str(event.get("agent_type") or "")
         activity.agent_run_id = str(event.get("run_id") or "")
+        activity.agent_fork = bool(event.get("fork"))
         activity.arguments = {
             "description": event.get("description"),
             "prompt": event.get("prompt"),
             "subagent_type": event.get("agent_type"),
+            "fork": event.get("fork"),
         }
     elif t == "agent_progress":
         activity.phase = str(event.get("phase") or "agent running")
@@ -1508,6 +1579,8 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
         activity.name = "agent"
         activity.agent_id = str(event.get("agent_id") or "")
         activity.agent_type = str(event.get("agent_type") or "")
+        activity.agent_background = True
+        activity.agent_fork = bool(event.get("fork"))
         activity.arguments = {
             "description": event.get("description"),
             "subagent_type": event.get("agent_type"),
@@ -1523,6 +1596,8 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
         activity.agent_status = str(event.get("status") or "")
         activity.agent_run_id = str(event.get("run_id") or activity.agent_run_id or "")
         activity.agent_trajectory_path = str(event.get("trajectory_path") or "")
+        activity.agent_background = True
+        activity.agent_fork = bool(event.get("fork", activity.agent_fork))
         activity.result_preview = _compact(str(event.get("final_message") or event.get("error") or ""), 1200)
     return activity
 
@@ -1702,10 +1777,14 @@ def _render_build_activity(build: BuildActivity) -> Text:
     return text
 
 
-def _render_build_detail_title(build: BuildActivity) -> Text:
+def _render_build_detail_title(build: BuildActivity,
+                               build_index: int | None = None,
+                               build_count: int | None = None) -> Text:
     text = Text()
     text.append("▣ ", style="blue")
     text.append("Build", style="bold white")
+    if build_index is not None and build_count:
+        text.append(f" {build_index + 1}/{build_count}", style="dim")
     text.append(f" · {build.model}", style="dim")
     text.append(f" · {_format_elapsed(build.elapsed_s)}", style="dim")
     text.append(f" · {build.status}", style="dim")
@@ -1714,8 +1793,9 @@ def _render_build_detail_title(build: BuildActivity) -> Text:
     return text
 
 
-def _build_tool_options(build: BuildActivity, activities: dict[str, ToolActivity]) -> list[Option]:
-    if not build.tool_ids:
+def _build_tool_options(build: BuildActivity | None,
+                        activities: dict[str, ToolActivity]) -> list[Option]:
+    if build is None or not build.tool_ids:
         return [Option("No tool calls", id="-1", disabled=True)]
     options: list[Option] = []
     for index, call_id in enumerate(build.tool_ids):
@@ -1765,7 +1845,15 @@ def _render_build_detail(build: BuildActivity, activities: dict[str, ToolActivit
             text.append(selected.persisted_path, style="cyan")
         if selected.agent_type:
             text.append("\nsubagent: ", style="bold cyan")
-            text.append(selected.agent_type, style="cyan")
+            text.append(selected.agent_type, style=_agent_style(selected.agent_type))
+        if selected.agent_background or selected.agent_fork:
+            text.append("\nsubagent mode: ", style="bold cyan")
+            modes = []
+            if selected.agent_background:
+                modes.append("background")
+            if selected.agent_fork:
+                modes.append("fork")
+            text.append(", ".join(modes), style="cyan")
         if selected.agent_run_id:
             text.append("\nsubagent run: ", style="bold cyan")
             text.append(selected.agent_run_id, style="cyan")
@@ -1794,21 +1882,25 @@ def _render_build_detail(build: BuildActivity, activities: dict[str, ToolActivit
     return text
 
 
-def _render_build_detail_footer(build: BuildActivity, tool_index: int) -> Text:
+def _render_build_detail_footer(build: BuildActivity, tool_index: int,
+                                build_index: int | None = None,
+                                build_count: int | None = None) -> Text:
     text = Text()
     count = len(build.tool_ids)
     position = f"{tool_index + 1} of {count}" if count else "0 of 0"
     text.append("Build ", style="bold white")
-    text.append(f"({position})", style="dim")
+    if build_index is not None and build_count:
+        text.append(f"{build_index + 1}/{build_count} ", style="dim")
+    text.append(f"({position} tools)", style="dim")
     text.append(f"  {build.model}", style="dim")
     text.append(f"  {_format_elapsed(build.elapsed_s)}", style="dim")
     spacer = " " * 8
     text.append(spacer)
     text.append("Parent", style="bold white")
     text.append(" esc   ", style="dim")
-    text.append("Prev", style="bold white")
+    text.append("Prev Build", style="bold white")
     text.append(" left   ", style="dim")
-    text.append("Next", style="bold white")
+    text.append("Next Build", style="bold white")
     text.append(" right", style="dim")
     return text
 
@@ -1877,7 +1969,13 @@ def _tool_title(activity: ToolActivity) -> str:
     if activity.name == "agent":
         target = activity.agent_type or args.get("subagent_type") or "general"
         desc = args.get("description") or ""
-        return f"Agent {target} {_compact(str(desc), 80)}".strip()
+        flags = []
+        if activity.agent_background:
+            flags.append("bg")
+        if activity.agent_fork:
+            flags.append("fork")
+        marker = f" [{' '.join(flags)}]" if flags else ""
+        return f"Agent {target}{marker} {_compact(str(desc), 80)}".strip()
     if activity.name == "bash":
         return f"Bash {_compact(str(args.get('command') or ''), 120).replace(chr(10), ' ')}".strip()
     if activity.name in {"read_file", "write_file", "edit_file", "glob_files", "grep"}:
@@ -1916,6 +2014,10 @@ def _tool_inline_details(activity: ToolActivity) -> str:
         bits.append(f"agent={activity.agent_type}")
     if activity.agent_status:
         bits.append(f"status={activity.agent_status}")
+    if activity.agent_background:
+        bits.append("background")
+    if activity.agent_fork:
+        bits.append("fork")
     return " | ".join(bit for bit in bits if bit)
 
 
@@ -1938,11 +2040,22 @@ def _activity_style(activity: ToolActivity) -> str:
         return "red"
     if activity.permission == "waiting" or activity.phase == "waiting":
         return "yellow"
+    if activity.name == "agent":
+        return _agent_style(activity.agent_type)
     if activity.phase == "running":
         return "cyan"
     if activity.phase == "done" or activity.ok is True:
         return "green"
     return "magenta"
+
+
+def _agent_style(agent_type: str | None) -> str:
+    return {
+        "explore": "cyan",
+        "plan": "green",
+        "general": "yellow",
+        "verify": "red",
+    }.get(agent_type or "", "magenta")
 
 
 def _activity_status(activity: ToolActivity) -> str:
@@ -1954,14 +2067,27 @@ def _activity_status(activity: ToolActivity) -> str:
 
 
 def _latest_build(ui: UiSession) -> BuildActivity | None:
-    if ui.current_build:
+    if ui.current_build and _build_has_details(ui.current_build):
         return ui.current_build
     for record in reversed(ui.records):
         if record.kind == "build_activity":
             build = record.meta.get("build")
-            if isinstance(build, BuildActivity):
+            if isinstance(build, BuildActivity) and _build_has_details(build):
                 return build
+    if ui.current_build:
+        return ui.current_build
     return None
+
+
+def _build_has_details(build: BuildActivity) -> bool:
+    return bool(build.tool_ids or build.audit or build.thinking.strip())
+
+
+def _build_index(builds: list[BuildActivity], build: BuildActivity) -> int:
+    try:
+        return builds.index(build)
+    except ValueError:
+        return max(len(builds) - 1, 0)
 
 
 def _spinner_frame(build: BuildActivity) -> str:
@@ -2152,6 +2278,19 @@ def _format_runs(runs_dir: Path, last_run_id: str | None) -> str:
         marker = "*" if path.name == last_run_id else "-"
         rows.append(f"{marker} {path.name}")
     return "\n".join(rows)
+
+
+def _format_auto_mode_status(cfg: Config) -> str:
+    if cfg.permission_mode == "bypass" and cfg.yolo:
+        state = "full"
+        detail = "bypass mode plus yolo for legacy dangerous checks"
+    elif cfg.permission_mode == "bypass":
+        state = "on"
+        detail = "bypass mode; sensitive file checks still apply"
+    else:
+        state = "off"
+        detail = f"permission_mode={cfg.permission_mode}"
+    return f"auto_mode: {state}\n{detail}\nyolo={cfg.yolo}"
 
 
 def _split_destination(text: str) -> tuple[str, str]:

@@ -1,4 +1,4 @@
-"""Agent tool: delegate scoped work to built-in sub-agents."""
+"""Agent tool: delegate scoped work to built-in and project sub-agents."""
 from __future__ import annotations
 
 from ..agents import format_agent_listing, get_agent_definition
@@ -6,14 +6,28 @@ from ..background_agents import BackgroundAgentManager
 from .registry import ToolContext, ToolResult, tool
 
 
+def agent_tool_description(workdir=None) -> str:
+    return (
+        "Launch a specialized sub-agent for complex multi-step work. "
+        "Available subagent_type values for the current workspace:\n"
+        f"{format_agent_listing(workdir)}\n"
+        "Project agents are loaded from .tiny-harness/agents/*.md. "
+        "Use explore/plan/verify for read-only investigation or validation, "
+        "custom project agents for domain reviews, and general for scoped "
+        "implementation. Set fork=true when the child needs a snapshot of the "
+        "parent conversation. Set run_in_background=true for long verification "
+        "or parallel review; the parent will receive a completion notification. "
+        "The sub-agent returns a concise result to you; detailed trajectory is "
+        "saved separately."
+    )
+
+
 AGENT_TOOL_DESCRIPTION = (
     "Launch a specialized sub-agent for complex multi-step work. "
-    "Available subagent_type values:\n"
-    f"{format_agent_listing()}\n"
-    "Use explore/plan/verify for read-only investigation or validation. "
-    "Use general for scoped implementation. Set fork=true only when the child "
-    "needs a snapshot of the parent conversation. The sub-agent returns a "
-    "concise result to you; detailed trajectory is saved separately."
+    "Built-in subagent_type values are explore, plan, general, and verify. "
+    "Project agents are also available from .tiny-harness/agents/*.md. "
+    "Use fork=true to pass a parent context snapshot; use "
+    "run_in_background=true for long verification or parallel review."
 )
 
 
@@ -37,11 +51,18 @@ AGENT_TOOL_DESCRIPTION = (
             },
             "run_in_background": {
                 "type": ["boolean", "null"],
-                "description": "Reserved for the next milestone; currently must be false/null",
+                "description": (
+                    "When true, run the sub-agent in the background. The parent "
+                    "conversation receives a completion notification on a later "
+                    "turn and /agents shows status."
+                ),
             },
             "fork": {
                 "type": ["boolean", "null"],
-                "description": "Reserved for the next milestone; currently must be false/null",
+                "description": (
+                    "When true, pass a snapshot of the parent conversation to "
+                    "the sub-agent before the delegated prompt."
+                ),
             },
         },
     },

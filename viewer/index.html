@@ -468,6 +468,9 @@ var EVENT_TYPES = [
   ['tool_start','工具开始'], ['tool_progress','工具进度'],
   ['tool_result','工具结果'], ['tool_end','工具结束'],
   ['tool_result_persisted','结果落盘'], ['tool_context_modified','上下文修改'], ['retry','重试'],
+  ['agent_start','子Agent开始'], ['agent_progress','子Agent进度'],
+  ['agent_done','子Agent完成'], ['agent_error','子Agent错误'],
+  ['agent_background_start','后台Agent开始'], ['agent_background_done','后台Agent完成'],
   ['context_edit','上下文清理'], ['error','错误'], ['run_end','结束'],
 ];
 
@@ -559,10 +562,10 @@ function debounce(fn, ms){
 function renderMarkdown(src){
   var blocks = [];
   var text = String(src == null ? '' : src);
-  // 1. 抽离围栏代码块，用  N  占位（不会被 escapeHtml 改写）
+  // 1. 抽离围栏代码块，用 ASCII 占位符（不会被 escapeHtml 改写）
   text = text.replace(/```[ \t]*(\w*)[ \t]*\n?([\s\S]*?)```/g, function(m, lang, code){
     blocks.push('<pre class="md-code"><code>' + escapeHtml(code.replace(/\n$/, '')) + '</code></pre>');
-    return ' ' + (blocks.length - 1) + ' ';
+    return '@@CODEBLOCK_' + (blocks.length - 1) + '@@';
   });
   // 2. 整体转义
   text = escapeHtml(text);
@@ -574,7 +577,7 @@ function renderMarkdown(src){
     return '<p>' + p + '</p>';
   }).join('');
   // 5. 回填代码块
-  text = text.replace(/ (\d+) /g, function(m, i){ return blocks[+i] || ''; });
+  text = text.replace(/@@CODEBLOCK_(\d+)@@/g, function(m, i){ return blocks[+i] || ''; });
   return text;
 }
 
@@ -1182,6 +1185,33 @@ function renderToolLifecycle(ev){
   return div;
 }
 
+function renderAgentEvent(ev){
+  var div = document.createElement('div');
+  var done = ev.type === 'agent_done' || ev.type === 'agent_background_done';
+  var failed = ev.type === 'agent_error' || (done && ev.status && ev.status !== 'completed');
+  div.className = 'bar ' + (failed ? 'bar-error' : done ? 'bar-ctx' : 'bar-tool');
+  var bits = ['<b>' + escapeHtml(ev.type) + '</b>'];
+  bits.push('<span>' + escapeHtml(ev.agent_type || 'agent') + '</span>');
+  if (ev.agent_id) bits.push('<span class="sub">agent ' + escapeHtml(String(ev.agent_id)) + '</span>');
+  if (ev.run_id) bits.push('<span class="sub">run ' + escapeHtml(String(ev.run_id)) + '</span>');
+  if (ev.status) bits.push('<span class="badge">' + escapeHtml(String(ev.status)) + '</span>');
+  if (ev.phase) bits.push('<span class="sub">phase ' + escapeHtml(String(ev.phase)) + '</span>');
+  if (ev.tool_name) bits.push('<span class="sub">tool ' + escapeHtml(String(ev.tool_name)) + '</span>');
+  if (ev.fork) bits.push('<span class="badge">fork</span>');
+  if (ev.type.indexOf('background') >= 0) bits.push('<span class="badge">background</span>');
+  if (ev.trajectory_path) bits.push('<span class="sub">trajectory ' + escapeHtml(String(ev.trajectory_path)) + '</span>');
+  if (ev.error) bits.push('<span class="sub">error ' + escapeHtml(String(ev.error)) + '</span>');
+  div.innerHTML = bits.join(' ');
+  if (ev.final_message) {
+    var msg = document.createElement('details');
+    msg.className = 'raw-req';
+    msg.innerHTML = '<summary>final message</summary><pre class="json"></pre>';
+    msg.querySelector('pre').textContent = String(ev.final_message);
+    div.appendChild(msg);
+  }
+  return div;
+}
+
 function renderError(ev){
   var div = document.createElement('div');
   div.className = 'bar bar-error';
@@ -1254,6 +1284,13 @@ function appendEvent(ev, idx, frag){
     case 'tool_result_persisted':
     case 'tool_context_modified':
                          node = renderToolLifecycle(ev); break;
+    case 'agent_start':
+    case 'agent_progress':
+    case 'agent_done':
+    case 'agent_error':
+    case 'agent_background_start':
+    case 'agent_background_done':
+                         node = renderAgentEvent(ev); break;
     case 'tool_result':  node = renderToolResult(ev); break;
     case 'retry':        node = renderRetry(ev); break;
     case 'context_edit': node = renderContextEdit(ev); break;

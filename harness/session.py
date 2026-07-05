@@ -122,7 +122,7 @@ class AgentSession:
         tool_ctx.runtime.permission_context = self.permission_context
         tool_ctx.runtime.permission_resolver = self.permission_resolver
         tool_ctx.runtime.background_agents = self.background_agents
-        schemas = openai_tool_schemas()
+        schemas = openai_tool_schemas(self.cfg.workdir)
         logger = RunLogger(self.cfg.runs_dir)
         self.last_run_id = logger.run_id
 

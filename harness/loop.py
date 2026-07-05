@@ -114,7 +114,7 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
     """跑一个任务，返回 summary dict（同时落盘 summary.json）。"""
     cfg.workdir.mkdir(parents=True, exist_ok=True)
     messages = resume_messages or build_initial_messages(task or "", cfg)
-    schemas = openai_tool_schemas()
+    schemas = openai_tool_schemas(cfg.workdir)
     ledger = CostLedger(load_pricing())
     cm = ContextManager(cfg.context_budget, cfg.context_keep_recent,
                         cfg.context_hard_limit, cfg.tool_result_budget_chars,

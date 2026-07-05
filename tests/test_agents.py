@@ -5,6 +5,7 @@ from harness.loop import run_agent
 from harness.providers.base import ModelTurn, Provider
 from harness.telemetry import read_trajectory
 from harness.session import AgentSession
+from harness.tools.registry import openai_tool_schemas
 
 
 def test_builtin_agent_definitions_have_expected_tool_filters():
@@ -90,6 +91,30 @@ You write concise docs.
     assert agent.max_turns == 7
     assert agent.background is True
     assert "concise docs" in agent.system_prompt
+
+
+def test_agent_tool_schema_lists_project_agents(tmp_path):
+    agents_dir = tmp_path / ".tiny-harness" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "audit-reviewer.md").write_text("""---
+name: audit-reviewer
+description: reviews audit semantics
+tools: [read_file]
+---
+Review audit semantics.
+""", encoding="utf-8")
+
+    agent_schema = next(
+        schema for schema in openai_tool_schemas(tmp_path)
+        if schema["function"]["name"] == "agent"
+    )
+    description = agent_schema["function"]["description"]
+    params = agent_schema["function"]["parameters"]["properties"]
+
+    assert "audit-reviewer" in description
+    assert "Project agents are loaded" in description
+    assert "background" in params["run_in_background"]["description"]
+    assert "Reserved" not in params["fork"]["description"]
 
 
 class ParentChildProvider(Provider):

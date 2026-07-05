@@ -145,13 +145,23 @@ def _strictify(params: dict) -> dict:
     return params
 
 
-def openai_tool_schemas() -> list[dict]:
+def openai_tool_schemas(workdir: Path | None = None) -> list[dict]:
     return [
         {"type": "function",
-         "function": {"name": s.name, "description": s.description,
+         "function": {"name": s.name, "description": _schema_description(s, workdir),
                       "parameters": s.parameters, "strict": True}}
         for s in sorted(REGISTRY.values(), key=lambda spec: spec.name)
     ]
+
+
+def _schema_description(spec: ToolSpec, workdir: Path | None) -> str:
+    if spec.name != "agent":
+        return spec.description
+    try:
+        from .agent import agent_tool_description
+        return agent_tool_description(workdir)
+    except Exception:
+        return spec.description
 
 
 def find_tool_spec(name: str) -> ToolSpec | None:

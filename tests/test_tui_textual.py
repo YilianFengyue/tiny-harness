@@ -3,10 +3,14 @@ from harness.tui_textual import (
     PermissionPromptState,
     ToolActivity,
     UiRecord,
+    _activity_style,
     _command_matches,
     _fold_tool_event,
     _render_build_activity,
+    _render_build_detail_footer,
     _render_permission_request,
+    _latest_build,
+    _tool_title,
 )
 from harness.context_view import context_pill
 
@@ -132,7 +136,22 @@ def test_tui_folds_background_agent_lifecycle_into_tool_activity():
     assert activity.ok is True
     assert activity.agent_type == "explore"
     assert activity.agent_status == "completed"
+    assert activity.agent_background is True
+    assert activity.agent_fork is True
     assert activity.result_preview == "background result"
+
+
+def test_tui_agent_activity_uses_type_color_and_mode_labels():
+    activity = ToolActivity(
+        "a3",
+        name="agent",
+        agent_type="audit-reviewer",
+        agent_background=True,
+        agent_fork=True,
+    )
+
+    assert _activity_style(activity) == "magenta"
+    assert "[bg fork]" in _tool_title(activity)
 
 
 def test_tui_slash_menu_filters_commands():
@@ -150,6 +169,7 @@ def test_tui_slash_menu_includes_settings_and_features():
     hooks = _command_matches("/hoo")
     context = _command_matches("/con")
     compact = _command_matches("/com")
+    auto_mode = _command_matches("/auto")
 
     assert settings and settings[0][0].startswith("/settings")
     assert agents and agents[0][0].startswith("/agents")
@@ -158,6 +178,7 @@ def test_tui_slash_menu_includes_settings_and_features():
     assert hooks and hooks[0][0].startswith("/hooks")
     assert context and context[0][0].startswith("/context")
     assert compact and compact[0][0].startswith("/compact")
+    assert auto_mode and auto_mode[0][0].startswith("/auto_mode")
 
 
 def test_context_pill_renders_circle_percentage():
@@ -239,3 +260,31 @@ def test_build_done_renders_elapsed_and_ghost_thinking():
     assert "Ctrl+O" not in rendered
     assert ". Thinking:" in rendered
     assert "I should inspect" in rendered
+
+
+def test_latest_build_skips_empty_current_build():
+    class Ui:
+        pass
+
+    ui = Ui()
+    empty = BuildActivity("build-1-2", model="gpt-test")
+    useful = BuildActivity("build-1-1", model="gpt-test")
+    useful.tool_ids.append("c1")
+    ui.current_build = empty
+    ui.records = [
+        UiRecord("assistant", useful.id, "build_activity", {"build": useful}),
+        UiRecord("assistant", empty.id, "build_activity", {"build": empty}),
+    ]
+
+    assert _latest_build(ui) is useful
+
+
+def test_build_detail_footer_advertises_build_navigation():
+    build = BuildActivity("build-1-1", model="gpt-test")
+    build.tool_ids.append("c1")
+
+    rendered = _render_build_detail_footer(build, 0, 1, 3).plain
+
+    assert "2/3" in rendered
+    assert "Prev Build" in rendered
+    assert "Next Build" in rendered

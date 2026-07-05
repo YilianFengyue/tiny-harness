@@ -1,5 +1,5 @@
-from harness.tools.bash import check_dangerous
-from harness.tools.registry import execute_tool
+from harness.tools.bash import check_dangerous, is_read_only_command
+from harness.tools.registry import ToolRuntimeState, execute_tool
 
 
 def test_basic_command(ctx):
@@ -43,3 +43,15 @@ def test_dangerous_patterns():
     assert check_dangerous({"command": "rm out/tmp.txt"}) is None
     assert check_dangerous({"command": "echo sudoku"}) is None
     assert check_dangerous({"command": "curl http://example.com -o page.html"}) is None
+
+
+def test_pytest_command_is_allowed_for_read_only_verification(ctx):
+    ctx.runtime = ToolRuntimeState(require_read_only_tools=True)
+
+    r = execute_tool("bash", {"command": "python -m pytest -q"}, ctx)
+
+    assert r.ok
+    assert "exit code:" in r.text
+    assert is_read_only_command({"command": "pytest -q"})
+    assert not is_read_only_command({"command": "python -m pytest -q; echo bad"})
+    assert not is_read_only_command({"command": "python -c \"print('not pytest')\""})

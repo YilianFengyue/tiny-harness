@@ -41,6 +41,7 @@ READ_ONLY_COMMANDS = {
 }
 
 READ_ONLY_GIT_PREFIXES = ("git status", "git diff", "git log", "git show")
+PYTEST_COMMANDS = {"pytest"}
 
 
 def check_dangerous(arguments: dict) -> str | None:
@@ -61,6 +62,8 @@ def is_read_only_command(arguments: dict) -> bool:
     command = str(arguments.get("command", "")).strip()
     if not command:
         return False
+    if _is_pytest_command(command):
+        return True
     lowered = command.lower()
     if any(lowered == prefix or lowered.startswith(prefix + " ")
            for prefix in READ_ONLY_GIT_PREFIXES):
@@ -85,6 +88,23 @@ def is_read_only_command(arguments: dict) -> bool:
             return False
         saw_command = True
     return saw_command
+
+
+def _is_pytest_command(command: str) -> bool:
+    if re.search(r"(?:&&|\|\||;|\||>|>>|<)", command):
+        return False
+    try:
+        argv = shlex.split(command, posix=sys.platform != "win32")
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    base = PathLikeCommand(argv[0]).lower()
+    if base in PYTEST_COMMANDS:
+        return True
+    if base.startswith("python") and len(argv) >= 3 and argv[1:3] == ["-m", "pytest"]:
+        return True
+    return False
 
 
 def PathLikeCommand(value: str) -> str:

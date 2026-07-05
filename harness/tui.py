@@ -107,7 +107,7 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None,
     elif restored_run_id:
         print(f"restored:   {restored_run_id}")
     print("-" * 64)
-    print("Commands: /help  /agents  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /cost  /trace  /runs  /sessions  /exit")
+    print("Commands: /help  /agents  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /auto_mode  /cost  /trace  /runs  /sessions  /exit")
     print("=" * 64)
 
 
@@ -135,6 +135,7 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print("  /deny <rule> [local|project]   Add deny rule")
         print("  /ask <rule> [local|project]    Add ask rule")
         print("  /mode <mode> [local|project]   Set permission mode")
+        print("  /auto_mode [on|off|full|status]  Toggle automatic approval mode")
         print("  /exit   Quit the TUI session")
         return False
     if name == "/cost":
@@ -202,6 +203,9 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         return False
     if name == "/mode":
         _handle_mode_command(rest, cfg, session)
+        return False
+    if name == "/auto_mode":
+        _handle_auto_mode_command(rest, cfg, session)
         return False
 
     print(f"Unknown command: {name}. Try /help.")
@@ -308,6 +312,45 @@ def _handle_mode_command(text: str, cfg: Config, session: AgentSession) -> None:
         persist_permission_updates(cfg.workdir, (update,))
     print(summarize_permission_update(update))
     print(format_permission_context(context))
+
+
+def _handle_auto_mode_command(text: str, cfg: Config, session: AgentSession) -> None:
+    raw = (text.strip() or "status").lower()
+    if raw in {"status", "?"}:
+        print(_format_auto_mode_status(cfg))
+        return
+    if raw in {"on", "true", "1"}:
+        mode, yolo = "bypass", False
+    elif raw == "full":
+        mode, yolo = "bypass", True
+    elif raw in {"off", "false", "0"}:
+        mode, yolo = "default", False
+    else:
+        print("Usage: /auto_mode [on|off|full|status]")
+        return
+    update = PermissionUpdate("setMode", "session", mode=mode)
+    base_context = session.permission_context or load_permission_context(
+        cfg.workdir, _mode_override(cfg),
+        settings_snapshot=cfg.settings_snapshot)
+    context = apply_permission_update(base_context, update)
+    session.permission_context = context
+    cfg.permission_mode = mode
+    cfg.yolo = yolo
+    print(_format_auto_mode_status(cfg))
+    print(format_permission_context(context))
+
+
+def _format_auto_mode_status(cfg: Config) -> str:
+    if cfg.permission_mode == "bypass" and cfg.yolo:
+        state = "full"
+        detail = "bypass mode plus yolo for legacy dangerous checks"
+    elif cfg.permission_mode == "bypass":
+        state = "on"
+        detail = "bypass mode; sensitive file checks still apply"
+    else:
+        state = "off"
+        detail = f"permission_mode={cfg.permission_mode}"
+    return f"auto_mode: {state}\n{detail}\nyolo={cfg.yolo}"
 
 
 def _split_destination(text: str) -> tuple[str, str]:
