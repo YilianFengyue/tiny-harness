@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "mode": "default",
+    "allow": [
+      "Edit(src/ledgerguard/parser.py)",
+      "Edit(src/ledgerguard/pricing.py)",
+      "Edit(src/ledgerguard/risk.py)",
+      "Edit(src/ledgerguard/report.py)",
+      "Bash(python -m pytest -q)",
+      "Write(ACCEPTANCE.md)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

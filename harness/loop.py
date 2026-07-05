@@ -21,6 +21,7 @@ from queue import Empty, Queue
 import time
 
 from .cancel import CancelledError, CancellationToken
+from .background_agents import BackgroundAgentManager, notification_message
 from .compact import compact_conversation
 from .config import Config, load_pricing
 from .context import ContextManager, strip_internal_marks
@@ -120,6 +121,8 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
                         cfg.max_completion_tokens or 20_000)
     tool_ctx = ToolContext(cfg.workdir, cfg.bash_timeout, cfg.tool_output_limit)
     tool_ctx.runtime.config = cfg
+    tool_ctx.runtime.provider = provider
+    tool_ctx.runtime.background_agents = BackgroundAgentManager()
 
     events = _run_agent_events(task, cfg, provider, schemas, ledger, cm, tool_ctx, messages)
     terminal: TerminalState | None = None
@@ -149,6 +152,13 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                       messages: list[dict], session_id: str | None = None,
                       cancel_token: CancellationToken | None = None):
     state = AgentState(messages=messages)
+    if tool_ctx.runtime.config is None:
+        tool_ctx.runtime.config = cfg
+    if tool_ctx.runtime.provider is None:
+        tool_ctx.runtime.provider = provider
+    if tool_ctx.runtime.background_agents is None:
+        tool_ctx.runtime.background_agents = BackgroundAgentManager()
+    tool_ctx.runtime.messages = state.messages
     settings_snapshot = cfg.settings_snapshot
     mem_summary = memory_summary(cfg)
     yield {
@@ -213,6 +223,7 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
             yield {"type": "turn_start", "turn": state.turn,
                    "transition": state.transition.reason if state.transition else None,
                    "n_messages": len(state.messages)}
+            yield from _drain_background_agent_events(tool_ctx, state.messages, state.turn)
             yield {"type": "context_status", "turn": state.turn,
                    **cm.status(state.messages).as_dict()}
 
@@ -392,6 +403,7 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
             if resp.tool_calls:
                 tool_messages = []
                 try:
+                    tool_ctx.runtime.messages = [dict(message) for message in state.messages[:-1]]
                     for event in _run_tool_call_events(resp.tool_calls, tool_ctx, cfg,
                                                        state.turn, cancel_token):
                         if event["type"] == "tool_result_message":
@@ -440,6 +452,14 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
                 yield state.transition.as_event(state.turn)
                 continue
 
+            drained = list(_drain_background_agent_events(tool_ctx, state.messages, state.turn))
+            if drained:
+                for event in drained:
+                    yield event
+                state.transition = ContinueDecision("background_agent_done")
+                yield state.transition.as_event(state.turn)
+                continue
+
             return TerminalState("completed", state.turn, resp.content)
         return TerminalState("max_turns", state.turn)
     except KeyboardInterrupt:
@@ -459,6 +479,28 @@ def _run_tool_call_events(tool_calls: list[ToolCallRequest], tool_ctx: ToolConte
     """Execute tool calls while yielding live lifecycle/progress events."""
     for batch in _partition_tool_calls(tool_calls):
         yield from _run_tool_batch_events(batch, tool_ctx, cfg, turn, cancel_token)
+
+
+def _drain_background_agent_events(tool_ctx: ToolContext, messages: list[dict],
+                                   turn: int):
+    manager = tool_ctx.runtime.background_agents
+    if not isinstance(manager, BackgroundAgentManager):
+        return
+    for record in manager.drain_completed():
+        content = notification_message(record)
+        messages.append({"role": "user", "content": content})
+        yield {
+            "type": "agent_background_done",
+            "turn": turn,
+            "agent_id": record.agent_id,
+            "agent_type": record.agent_type,
+            "status": record.status,
+            "fork": record.fork,
+            "run_id": record.result.run_id if record.result else record.agent_id,
+            "trajectory_path": record.result.trajectory_path if record.result else None,
+            "final_message": record.result.final_message if record.result else None,
+            "error": record.error,
+        }
 
 
 def _partition_tool_calls(tool_calls: list[ToolCallRequest]) -> list[list[ToolCallRequest]]:

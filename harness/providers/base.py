@@ -100,3 +100,11 @@ class Provider(ABC):
         if turn.content:
             yield {"type": "assistant_delta", "content": turn.content}
         return turn
+
+    def spawn_child(self) -> "Provider":
+        """Return a provider instance for an isolated sub-agent run.
+
+        Stateless test providers can safely return ``self``. Real providers
+        should override this when they keep per-conversation state.
+        """
+        return self

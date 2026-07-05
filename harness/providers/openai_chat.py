@@ -39,10 +39,22 @@ class OpenAIChatProvider(Provider):
         self.max_retries = max_retries
         self.reasoning_effort = reasoning_effort
         self.max_completion_tokens = max_completion_tokens
+        self.timeout = timeout
         # DeepSeek 式思考方言：一旦某次响应携带 reasoning_content，后续每条
         # assistant 历史消息都必须带该字段（缺失补空串），否则 400。
         # 标准 OpenAI 模型永远不会触发此分支，不会被发送未知字段。
         self._thinking_dialect = False
+
+    def spawn_child(self) -> Provider:
+        return OpenAIChatProvider(
+            model=self.model,
+            api_key=self.client.api_key,
+            base_url=str(self.client.base_url) if self.client.base_url else None,
+            max_retries=self.max_retries,
+            reasoning_effort=self.reasoning_effort,
+            max_completion_tokens=self.max_completion_tokens,
+            timeout=self.timeout,
+        )
 
     def complete(self, messages: list[dict], tools: list[dict],
                  on_retry: RetryCallback | None = None) -> ModelTurn:
@@ -267,6 +279,12 @@ class ReplayProvider(Provider):
     def __init__(self, events: list[dict]):
         self._responses = [e for e in events if e["type"] == "llm_response"]
         self._i = 0
+
+    def spawn_child(self) -> Provider:
+        child = ReplayProvider([])
+        child._responses = self._responses
+        child._i = self._i
+        return child
 
     def complete(self, messages: list[dict], tools: list[dict],
                  on_retry: RetryCallback | None = None) -> ModelTurn:

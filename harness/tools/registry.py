@@ -39,6 +39,16 @@ class ToolRuntimeState:
     permission_context: object | None = None
     permission_resolver: PermissionResolver | None = None
     config: object | None = None
+    provider: object | None = None
+    agent_id: str | None = None
+    agent_type: str | None = None
+    agent_depth: int = 0
+    allowed_tools: set[str] | None = None
+    disallowed_tools: set[str] = field(default_factory=set)
+    require_read_only_tools: bool = False
+    event_callback: ProgressCallback | None = None
+    messages: list[dict] | None = None
+    background_agents: object | None = None
 
 
 @dataclass
@@ -157,6 +167,8 @@ def available_tool_names() -> str:
 
 def validate_tool_input(name: str, arguments: dict, ctx: ToolContext) -> None:
     spec = find_tool_spec(name)
+    if spec:
+        _validate_runtime_tool_access(spec, arguments, ctx)
     if spec and spec.validate_input:
         spec.validate_input(ctx, arguments)
 
@@ -211,6 +223,21 @@ def execute_tool(name: str, arguments: dict, ctx: ToolContext) -> ToolResult:
     except Exception as e:  # 工具自身 bug 也回传，给模型换路径的机会
         return ToolResult(f"Tool '{name}' crashed: {type(e).__name__}: {e}",
                           ok=False, duration_ms=_ms(t0), error_kind="crash")
+
+
+def _validate_runtime_tool_access(spec: ToolSpec, arguments: dict,
+                                  ctx: ToolContext) -> None:
+    allowed = ctx.runtime.allowed_tools
+    if allowed is not None and spec.name not in allowed:
+        raise ToolError(
+            f"Tool '{spec.name}' is not available to this agent. "
+            f"Allowed tools: {', '.join(sorted(allowed)) or '(none)'}.")
+    if spec.name in ctx.runtime.disallowed_tools:
+        raise ToolError(f"Tool '{spec.name}' is disallowed for this agent.")
+    if ctx.runtime.require_read_only_tools and not tool_property(spec, "read_only", arguments):
+        raise ToolError(
+            f"Tool '{spec.name}' is not read-only for these arguments. "
+            "Use read_file, grep, glob_files, file_info, show_diff, or a read-only bash command.")
 
 
 def _result_limit(spec: ToolSpec, ctx: ToolContext) -> int:

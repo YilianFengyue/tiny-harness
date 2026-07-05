@@ -95,6 +95,11 @@ class ToolActivity:
     context_note: str | None = None
     duration_ms: int | None = None
     error_kind: str | None = None
+    agent_id: str | None = None
+    agent_type: str | None = None
+    agent_status: str | None = None
+    agent_run_id: str | None = None
+    agent_trajectory_path: str | None = None
     audit: list[dict] = field(default_factory=list)
 
 
@@ -165,6 +170,7 @@ class PermissionPromptState:
 
 COMMANDS: tuple[tuple[str, str], ...] = (
     ("/help", "show shortcuts and slash commands"),
+    ("/agents", "show background sub-agent status"),
     ("/verbose", "show exact lifecycle events for this session"),
     ("/sessions", "switch between chat sessions"),
     ("/new", "create a new session"),
@@ -205,6 +211,12 @@ TOOL_EVENT_TYPES = {
     "tool_result",
     "tool_end",
     "tool_context_modified",
+    "agent_start",
+    "agent_progress",
+    "agent_done",
+    "agent_error",
+    "agent_background_start",
+    "agent_background_done",
 }
 
 MEMORY_EVENT_TYPES = {
@@ -1124,6 +1136,9 @@ if _TUI_IMPORT_ERROR is None:
             if name == "/verbose":
                 self.action_verbose()
                 return
+            if name == "/agents":
+                self._add_system(self._current().agent.agents_summary())
+                return
             if name == "/theme":
                 self.push_screen(ThemePicker(), self._apply_theme)
                 return
@@ -1462,6 +1477,53 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
             f"{k}={v}" for k, v in event.items()
             if k not in {"type", "turn", "tool_call_id", "name"}
         )
+    elif t == "agent_start":
+        activity.phase = "agent running"
+        activity.name = "agent"
+        activity.agent_id = str(event.get("agent_id") or "")
+        activity.agent_type = str(event.get("agent_type") or "")
+        activity.agent_run_id = str(event.get("run_id") or "")
+        activity.arguments = {
+            "description": event.get("description"),
+            "prompt": event.get("prompt"),
+            "subagent_type": event.get("agent_type"),
+        }
+    elif t == "agent_progress":
+        activity.phase = str(event.get("phase") or "agent running")
+        activity.name = "agent"
+        activity.agent_id = str(event.get("agent_id") or activity.agent_id or "")
+        activity.agent_type = str(event.get("agent_type") or activity.agent_type or "")
+    elif t in {"agent_done", "agent_error"}:
+        activity.phase = "done" if t == "agent_done" else "error"
+        activity.ok = t == "agent_done"
+        activity.name = "agent"
+        activity.agent_id = str(event.get("agent_id") or activity.agent_id or "")
+        activity.agent_type = str(event.get("agent_type") or activity.agent_type or "")
+        activity.agent_status = str(event.get("status") or "")
+        activity.agent_run_id = str(event.get("run_id") or activity.agent_run_id or "")
+        activity.agent_trajectory_path = str(event.get("trajectory_path") or "")
+        activity.result_preview = _compact(str(event.get("final_message") or ""), 1200)
+    elif t == "agent_background_start":
+        activity.phase = "background"
+        activity.name = "agent"
+        activity.agent_id = str(event.get("agent_id") or "")
+        activity.agent_type = str(event.get("agent_type") or "")
+        activity.arguments = {
+            "description": event.get("description"),
+            "subagent_type": event.get("agent_type"),
+            "fork": event.get("fork"),
+            "run_in_background": True,
+        }
+    elif t == "agent_background_done":
+        activity.phase = "done" if event.get("status") == "completed" else "error"
+        activity.ok = event.get("status") == "completed"
+        activity.name = "agent"
+        activity.agent_id = str(event.get("agent_id") or activity.agent_id or "")
+        activity.agent_type = str(event.get("agent_type") or activity.agent_type or "")
+        activity.agent_status = str(event.get("status") or "")
+        activity.agent_run_id = str(event.get("run_id") or activity.agent_run_id or "")
+        activity.agent_trajectory_path = str(event.get("trajectory_path") or "")
+        activity.result_preview = _compact(str(event.get("final_message") or event.get("error") or ""), 1200)
     return activity
 
 
@@ -1701,6 +1763,15 @@ def _render_build_detail(build: BuildActivity, activities: dict[str, ToolActivit
         if selected.persisted_path:
             text.append("\nsaved: ", style="bold cyan")
             text.append(selected.persisted_path, style="cyan")
+        if selected.agent_type:
+            text.append("\nsubagent: ", style="bold cyan")
+            text.append(selected.agent_type, style="cyan")
+        if selected.agent_run_id:
+            text.append("\nsubagent run: ", style="bold cyan")
+            text.append(selected.agent_run_id, style="cyan")
+        if selected.agent_trajectory_path:
+            text.append("\nsubagent trajectory: ", style="bold cyan")
+            text.append(selected.agent_trajectory_path, style="cyan")
         if selected.context_note:
             text.append("\ncontextModifier: ", style="bold magenta")
             text.append(selected.context_note, style="magenta")
@@ -1803,6 +1874,10 @@ def _render_tool_activity(activity: ToolActivity) -> Text:
 
 def _tool_title(activity: ToolActivity) -> str:
     args = activity.arguments or {}
+    if activity.name == "agent":
+        target = activity.agent_type or args.get("subagent_type") or "general"
+        desc = args.get("description") or ""
+        return f"Agent {target} {_compact(str(desc), 80)}".strip()
     if activity.name == "bash":
         return f"Bash {_compact(str(args.get('command') or ''), 120).replace(chr(10), ' ')}".strip()
     if activity.name in {"read_file", "write_file", "edit_file", "glob_files", "grep"}:
@@ -1837,6 +1912,10 @@ def _tool_inline_details(activity: ToolActivity) -> str:
         bits.append(f"{activity.duration_ms}ms")
     if activity.error_kind:
         bits.append(f"kind={activity.error_kind}")
+    if activity.agent_type:
+        bits.append(f"agent={activity.agent_type}")
+    if activity.agent_status:
+        bits.append(f"status={activity.agent_status}")
     return " | ".join(bit for bit in bits if bit)
 
 
@@ -1869,6 +1948,8 @@ def _activity_style(activity: ToolActivity) -> str:
 def _activity_status(activity: ToolActivity) -> str:
     if activity.permission == "waiting":
         return f"waiting permission: {activity.name}"
+    if activity.name == "agent":
+        return f"{activity.phase}: {activity.agent_type or 'agent'}"
     return f"{activity.phase}: {activity.name}"
 
 
@@ -1993,7 +2074,8 @@ def _format_audit_event(event: dict) -> str:
             bits.append(str(name))
         if call_id:
             bits.append(str(call_id))
-        for key in ("decision", "reason_type", "mode", "resolver", "ok", "persisted"):
+        for key in ("decision", "reason_type", "mode", "resolver", "ok", "persisted",
+                    "agent_type", "status", "phase"):
             if key in event:
                 bits.append(f"{key}={event[key]}")
         if event.get("reason"):

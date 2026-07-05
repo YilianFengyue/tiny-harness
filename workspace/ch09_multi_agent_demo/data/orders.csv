@@ -1,0 +1,9 @@
+invoice_id,customer_id,amount,currency,status,days_overdue,risk_flags,notes
+INV-1001,C-001,2.675,USD,open,0,,precision edge
+INV-1002,C-001,10.005,USD,open,31,late_fee,half-up edge
+INV-1003,C-002,1200.00,USD,open,91,manual_review|sanctions_hit,very risky
+INV-1004,C-003,50.00,EUR,paid,0,,paid booked but not exposure
+INV-1005,C-004,99.99,USD,open,5,chargeback,chargeback should be high risk
+INV-1006,C-005,not-a-number,USD,open,1,,invalid amount
+INV-1002,C-001,10.005,USD,open,31,late_fee,duplicate invoice id
+

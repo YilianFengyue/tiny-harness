@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .background_agents import BackgroundAgentManager, format_background_agents
 from .cancel import CancellationToken
 from .compact import compact_conversation
 from .config import Config, load_pricing
@@ -54,6 +55,7 @@ class AgentSession:
     app_state: Store[AppState] | None = None
     memory_controller: MemoryExtractionController | None = None
     context_manager: ContextManager | None = None
+    background_agents: BackgroundAgentManager = field(default_factory=BackgroundAgentManager)
 
     def __post_init__(self) -> None:
         if self.memory_controller is None:
@@ -116,8 +118,10 @@ class AgentSession:
         tool_ctx = ToolContext(self.cfg.workdir, self.cfg.bash_timeout,
                                self.cfg.tool_output_limit)
         tool_ctx.runtime.config = self.cfg
+        tool_ctx.runtime.provider = self.provider
         tool_ctx.runtime.permission_context = self.permission_context
         tool_ctx.runtime.permission_resolver = self.permission_resolver
+        tool_ctx.runtime.background_agents = self.background_agents
         schemas = openai_tool_schemas()
         logger = RunLogger(self.cfg.runs_dir)
         self.last_run_id = logger.run_id
@@ -227,6 +231,9 @@ class AgentSession:
             "cost_usd": round(self.cost_usd, 6),
             "pricing_unknown": self.pricing_unknown,
         }
+
+    def agents_summary(self) -> str:
+        return format_background_agents(self.background_agents)
 
     def persist_index(self, title: str | None = None) -> None:
         if not self.last_run_id:

@@ -107,7 +107,7 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None,
     elif restored_run_id:
         print(f"restored:   {restored_run_id}")
     print("-" * 64)
-    print("Commands: /help  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /cost  /trace  /runs  /sessions  /exit")
+    print("Commands: /help  /agents  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /cost  /trace  /runs  /sessions  /exit")
     print("=" * 64)
 
 
@@ -119,6 +119,7 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
     if name == "/help":
         print("Commands:")
         print("  /cost   Show cumulative session token/cost totals")
+        print("  /agents Show background sub-agent status and latest results")
         print("  /context  Show current context budget and warning state")
         print("  /compact [note]  Manually compact old tool results")
         print("  /trace  Print latest trajectory path and viewer URL")
@@ -144,6 +145,9 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print(f"tokens input={u['prompt_tokens']} cached={u['cached_tokens']} "
               f"output={u['completion_tokens']} reasoning={u['reasoning_tokens']}")
         print(f"last_run_id={s['last_run_id']}")
+        return False
+    if name == "/agents":
+        print(session.agents_summary())
         return False
     if name == "/context":
         print(format_context_summary(session.context_status()))
@@ -392,6 +396,21 @@ def _print_event(event: dict) -> None:
                           if k not in {"type", "turn", "tool_call_id", "name", "phase"})
         suffix = f" {extras}" if extras else ""
         print(f"[tool] progress {event['name']} {phase}{suffix}")
+    elif t == "agent_background_start":
+        fork = " fork" if event.get("fork") else ""
+        print(f"[agent] background start {event.get('agent_type')}{fork} id={event.get('agent_id')}")
+    elif t == "agent_background_done":
+        fork = " fork" if event.get("fork") else ""
+        print(f"[agent] background done {event.get('agent_type')}{fork} "
+              f"status={event.get('status')} run={event.get('run_id')}")
+    elif t == "agent_start":
+        print(f"[agent] start {event.get('agent_type')} run={event.get('run_id')}")
+    elif t == "agent_done":
+        print(f"[agent] done {event.get('agent_type')} status={event.get('status')} "
+              f"run={event.get('run_id')}")
+    elif t == "agent_error":
+        print(f"[agent] error {event.get('agent_type')} status={event.get('status')} "
+              f"run={event.get('run_id')}")
     elif t == "tool_result":
         status = "ok" if event.get("ok") else "error"
         trunc = " truncated" if event.get("truncated") else ""

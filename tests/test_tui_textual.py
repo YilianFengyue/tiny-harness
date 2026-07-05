@@ -77,6 +77,64 @@ def test_tui_activity_keeps_verbose_permission_and_persistence_details():
     ]
 
 
+def test_tui_folds_agent_lifecycle_into_tool_activity():
+    activities: dict[str, ToolActivity] = {}
+    _fold_tool_event(activities, {"type": "tool_call", "tool_call_id": "a1",
+                                  "name": "agent", "arguments": {
+                                      "description": "inspect code",
+                                      "subagent_type": "explore",
+                                  }})
+    _fold_tool_event(activities, {"type": "agent_start", "tool_call_id": "a1",
+                                  "name": "agent", "agent_id": "run-child",
+                                  "agent_type": "explore", "run_id": "run-child",
+                                  "description": "inspect code",
+                                  "prompt": "find issue"})
+    _fold_tool_event(activities, {"type": "agent_done", "tool_call_id": "a1",
+                                  "name": "agent", "agent_id": "run-child",
+                                  "agent_type": "explore", "run_id": "run-child",
+                                  "status": "completed",
+                                  "trajectory_path": "runs/run-child/trajectory.jsonl",
+                                  "final_message": "found issue"})
+
+    activity = activities["a1"]
+    rendered = _render_build_activity(BuildActivity("b1", model="gpt-test")).plain
+
+    assert activity.name == "agent"
+    assert activity.agent_type == "explore"
+    assert activity.agent_run_id == "run-child"
+    assert activity.agent_trajectory_path.endswith("trajectory.jsonl")
+    assert activity.result_preview == "found issue"
+    assert "Build" in rendered
+
+
+def test_tui_folds_background_agent_lifecycle_into_tool_activity():
+    activities: dict[str, ToolActivity] = {}
+    _fold_tool_event(activities, {"type": "tool_call", "tool_call_id": "a2",
+                                  "name": "agent", "arguments": {
+                                      "description": "background inspect",
+                                      "subagent_type": "explore",
+                                      "run_in_background": True,
+                                  }})
+    _fold_tool_event(activities, {"type": "agent_background_start", "tool_call_id": "a2",
+                                  "name": "agent", "agent_id": "bg-1",
+                                  "agent_type": "explore", "fork": True,
+                                  "description": "background inspect"})
+    _fold_tool_event(activities, {"type": "agent_background_done", "tool_call_id": "a2",
+                                  "name": "agent", "agent_id": "bg-1",
+                                  "agent_type": "explore", "run_id": "run-child",
+                                  "status": "completed",
+                                  "trajectory_path": "runs/run-child/trajectory.jsonl",
+                                  "final_message": "background result"})
+
+    activity = activities["a2"]
+
+    assert activity.phase == "done"
+    assert activity.ok is True
+    assert activity.agent_type == "explore"
+    assert activity.agent_status == "completed"
+    assert activity.result_preview == "background result"
+
+
 def test_tui_slash_menu_filters_commands():
     matches = _command_matches("/per")
 
@@ -86,6 +144,7 @@ def test_tui_slash_menu_filters_commands():
 
 def test_tui_slash_menu_includes_settings_and_features():
     settings = _command_matches("/set")
+    agents = _command_matches("/age")
     features = _command_matches("/fea")
     memory = _command_matches("/mem")
     hooks = _command_matches("/hoo")
@@ -93,6 +152,7 @@ def test_tui_slash_menu_includes_settings_and_features():
     compact = _command_matches("/com")
 
     assert settings and settings[0][0].startswith("/settings")
+    assert agents and agents[0][0].startswith("/agents")
     assert features and features[0][0].startswith("/features")
     assert memory and memory[0][0].startswith("/memory")
     assert hooks and hooks[0][0].startswith("/hooks")
