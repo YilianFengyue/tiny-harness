@@ -5,13 +5,14 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from xml.sax.saxutils import escape
 from typing import Callable, TYPE_CHECKING
 
 from .agents import AgentDefinition
 from .cancel import CancellationToken
 
 if TYPE_CHECKING:
-    from .subagent import SubagentRunResult
+    from .subagent import SubagentRunResult, SubagentRuntime
     from .tools.registry import ToolContext
 
 
@@ -28,6 +29,9 @@ class BackgroundAgentRecord:
     error: str | None = None
     notified: bool = False
     fork: bool = False
+    runtime: "SubagentRuntime | None" = None
+    resume_count: int = 0
+    resumable: bool = True
 
     def as_dict(self) -> dict:
         return {
@@ -43,6 +47,8 @@ class BackgroundAgentRecord:
             "run_id": self.result.run_id if self.result else self.agent_id,
             "trajectory_path": self.result.trajectory_path if self.result else None,
             "final_message": self.result.final_message if self.result else None,
+            "resume_count": self.resume_count,
+            "resumable": self.resumable and self.runtime is not None,
         }
 
 
@@ -56,30 +62,78 @@ class BackgroundAgentManager:
               fork_messages: list[dict] | None = None,
               emit: Callable[[dict], None] | None = None) -> BackgroundAgentRecord:
         agent_id = f"bg-{int(time.time() * 1000)}-{len(self._records) + 1}"
+        from .subagent import create_subagent_runtime
+
+        runtime = create_subagent_runtime(
+            agent,
+            prompt,
+            parent_ctx,
+            description=description,
+            fork_messages=fork_messages,
+            agent_id=agent_id,
+        )
         record = BackgroundAgentRecord(
             agent_id=agent_id,
             agent_type=agent.agent_type,
             description=description,
             prompt=prompt,
             fork=fork,
+            runtime=runtime,
         )
         with self._lock:
             self._records[agent_id] = record
+        self._launch(record, prompt, parent_ctx, description=description,
+                     fork=fork, emit=emit)
+        return record
 
+    def send_message(self, agent_id: str, prompt: str, parent_ctx: "ToolContext",
+                     *, description: str | None = None,
+                     emit: Callable[[dict], None] | None = None
+                     ) -> tuple[BackgroundAgentRecord | None, str | None]:
+        with self._lock:
+            record = self._records.get(agent_id)
+            if record is None:
+                return None, f"unknown worker agent_id {agent_id!r}"
+            if record.status == "running":
+                return record, f"worker {agent_id} is still running"
+            if record.runtime is None or not record.resumable:
+                return record, f"worker {agent_id} is not resumable"
+            from .subagent import append_resume_message
+
+            append_resume_message(record.runtime, prompt)
+            record.resume_count = record.runtime.resume_count
+            record.description = description or record.description
+            record.prompt = record.prompt + "\n\n[Coordinator SendMessage]\n" + prompt
+            record.status = "running"
+            record.started_at = time.time()
+            record.finished_at = None
+            record.error = None
+            record.notified = False
+        self._launch(record, prompt, parent_ctx,
+                     description=description or record.description,
+                     fork=record.fork, emit=emit)
+        return record, None
+
+    def _launch(self, record: BackgroundAgentRecord, prompt: str,
+                parent_ctx: "ToolContext", *, description: str,
+                fork: bool = False,
+                emit: Callable[[dict], None] | None = None) -> None:
         token = CancellationToken()
 
         def run() -> None:
             try:
-                from .subagent import run_subagent
+                from .subagent import run_subagent_runtime
 
-                result = run_subagent(
-                    agent,
+                if record.runtime is None:
+                    raise RuntimeError("background agent has no runtime")
+                result = run_subagent_runtime(
+                    record.runtime,
                     prompt,
                     parent_ctx,
                     description=description,
                     emit=emit,
                     cancel_token=token,
-                    fork_messages=fork_messages,
+                    fork=fork,
                 )
                 with self._lock:
                     record.result = result
@@ -92,9 +146,12 @@ class BackgroundAgentManager:
                     record.finished_at = time.time()
                     record.prompt = record.prompt + "\n\n" + traceback.format_exc(limit=5)
 
-        thread = threading.Thread(target=run, name=f"tiny-agent-{agent_id}", daemon=True)
+        thread = threading.Thread(
+            target=run,
+            name=f"tiny-agent-{record.agent_id}",
+            daemon=True,
+        )
         thread.start()
-        return record
 
     def list(self) -> list[BackgroundAgentRecord]:
         with self._lock:
@@ -123,9 +180,11 @@ def format_background_agents(manager: BackgroundAgentManager | None) -> str:
     for record in records:
         elapsed = ((record.finished_at or time.time()) - record.started_at)
         kind = " fork" if record.fork else ""
+        resume = f" resume={record.resume_count}" if record.resume_count else ""
+        resumable = " resumable" if record.resumable and record.runtime else ""
         run = record.result.run_id if record.result else record.agent_id
         lines.append(
-            f"- {record.agent_type}{kind} {record.status} "
+            f"- {record.agent_type}{kind}{resume}{resumable} {record.status} "
             f"{elapsed:.1f}s run={run} desc={record.description}")
         if record.error:
             lines.append(f"  error: {record.error}")
@@ -135,7 +194,10 @@ def format_background_agents(manager: BackgroundAgentManager | None) -> str:
     return "\n".join(lines)
 
 
-def notification_message(record: BackgroundAgentRecord) -> str:
+def notification_message(record: BackgroundAgentRecord,
+                         coordinator_mode: bool = False) -> str:
+    if coordinator_mode:
+        return _task_notification(record)
     if record.result:
         return (
             "[Background subagent completed]\n"
@@ -151,3 +213,40 @@ def notification_message(record: BackgroundAgentRecord) -> str:
         f"status: {record.status}\n"
         f"error: {record.error or 'unknown error'}"
     )
+
+
+def _task_notification(record: BackgroundAgentRecord) -> str:
+    task_id = record.agent_id
+    status = record.status if record.status in {"completed", "failed", "killed"} else "failed"
+    if record.result and record.result.status != "completed":
+        status = "failed"
+    if record.error:
+        status = "failed"
+    summary = (
+        f"Worker {record.agent_type} {status}: {record.description}"
+        if status != "completed"
+        else f"Worker {record.agent_type} completed: {record.description}"
+    )
+    result = record.result
+    text = [
+        "<task-notification>",
+        f"<task-id>{escape(task_id)}</task-id>",
+        f"<status>{escape(status)}</status>",
+        f"<summary>{escape(summary)}</summary>",
+        f"<resumable>{str(record.resumable and record.runtime is not None).lower()}</resumable>",
+        f"<resume-count>{record.resume_count}</resume-count>",
+    ]
+    if result:
+        text.extend([
+            f"<run-id>{escape(result.run_id)}</run-id>",
+            f"<trajectory>{escape(result.trajectory_path)}</trajectory>",
+            f"<result>{escape(result.final_message or '(no final message)')}</result>",
+            "<usage>",
+            f"<total_tokens>{result.usage.prompt_tokens + result.usage.completion_tokens}</total_tokens>",
+            f"<tool_uses>{result.tool_count}</tool_uses>",
+            "</usage>",
+        ])
+    elif record.error:
+        text.append(f"<result>{escape(record.error)}</result>")
+    text.append("</task-notification>")
+    return "\n".join(text)

@@ -17,5 +17,7 @@ def test_viewer_knows_multi_agent_events_and_is_text():
     ):
         assert event_type in text
     assert "function renderAgentEvent" in text
+    assert "task-notification" in text
+    assert "scratchpad" in text
     assert "@@CODEBLOCK_" in text
     assert "replace(/(\\d+)/g" not in text

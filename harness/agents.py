@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TYPE_CHECKING
 
+from .coordinator import WORKER_PROMPT
+
 if TYPE_CHECKING:
     from .tools.registry import ToolSpec
 
@@ -92,6 +94,15 @@ BUILT_IN_AGENTS: tuple[AgentDefinition, ...] = (
         max_turns=12,
         color="red",
         require_read_only_tools=True,
+    ),
+    AgentDefinition(
+        "worker",
+        "Coordinator worker for research, implementation, and verification.",
+        WORKER_PROMPT,
+        disallowed_tools=("agent",),
+        max_turns=20,
+        background=True,
+        color="magenta",
     ),
 )
 

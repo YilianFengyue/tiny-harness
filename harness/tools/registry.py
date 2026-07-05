@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import copy
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -145,23 +146,39 @@ def _strictify(params: dict) -> dict:
     return params
 
 
-def openai_tool_schemas(workdir: Path | None = None) -> list[dict]:
+def openai_tool_schemas(workdir: Path | None = None,
+                        coordinator_mode: bool = False) -> list[dict]:
     return [
         {"type": "function",
-         "function": {"name": s.name, "description": _schema_description(s, workdir),
-                      "parameters": s.parameters, "strict": True}}
+         "function": {"name": s.name, "description": _schema_description(s, workdir, coordinator_mode),
+                      "parameters": _schema_parameters(s, coordinator_mode),
+                      "strict": True}}
         for s in sorted(REGISTRY.values(), key=lambda spec: spec.name)
     ]
 
 
-def _schema_description(spec: ToolSpec, workdir: Path | None) -> str:
+def _schema_description(spec: ToolSpec, workdir: Path | None,
+                        coordinator_mode: bool) -> str:
     if spec.name != "agent":
         return spec.description
     try:
         from .agent import agent_tool_description
-        return agent_tool_description(workdir)
+        return agent_tool_description(workdir, coordinator_mode=coordinator_mode)
     except Exception:
         return spec.description
+
+
+def _schema_parameters(spec: ToolSpec, coordinator_mode: bool) -> dict:
+    if spec.name != "agent" or coordinator_mode:
+        return spec.parameters
+    params = copy.deepcopy(spec.parameters)
+    props = params.get("properties")
+    if isinstance(props, dict):
+        props.pop("agent_id", None)
+    required = params.get("required")
+    if isinstance(required, list):
+        params["required"] = [name for name in required if name != "agent_id"]
+    return params
 
 
 def find_tool_spec(name: str) -> ToolSpec | None:

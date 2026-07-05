@@ -1,7 +1,7 @@
 from conftest import MockProvider, turn
 
 from harness.agents import agent_tool_names, get_agent_definition, parse_agent_markdown
-from harness.loop import run_agent
+from harness.loop import run_agent, tool_schemas_for_config
 from harness.providers.base import ModelTurn, Provider
 from harness.telemetry import read_trajectory
 from harness.session import AgentSession
@@ -17,6 +17,10 @@ def test_builtin_agent_definitions_have_expected_tool_filters():
     assert "read_file" in agent_tool_names(explore)
     assert "agent" not in agent_tool_names(explore)
     assert "agent" not in agent_tool_names(general)
+    worker = get_agent_definition("worker")
+    assert worker is not None
+    assert "read_file" in agent_tool_names(worker)
+    assert "agent" not in agent_tool_names(worker)
 
 
 def test_agent_tool_runs_foreground_subagent(make_cfg, make_logger):
@@ -115,17 +119,31 @@ Review audit semantics.
     assert "Project agents are loaded" in description
     assert "background" in params["run_in_background"]["description"]
     assert "Reserved" not in params["fork"]["description"]
+    assert "agent_id" not in params
+
+
+def test_coordinator_tool_schema_only_exposes_agent(make_cfg, tmp_path):
+    schemas = tool_schemas_for_config(make_cfg(workdir=tmp_path, coordinator_mode=True))
+    names = [schema["function"]["name"] for schema in schemas]
+    agent_schema = next(schema for schema in schemas if schema["function"]["name"] == "agent")
+
+    assert names == ["agent"]
+    assert "read_file" in [schema["function"]["name"] for schema in openai_tool_schemas(tmp_path)]
+    assert "worker" in agent_schema["function"]["description"]
+    assert "agent_id" in agent_schema["function"]["parameters"]["properties"]
 
 
 class ParentChildProvider(Provider):
     def __init__(self, parent_turns, child_turns):
         self.parent = MockProvider(parent_turns)
         self.child = MockProvider(child_turns)
+        self.child_spawns = 0
 
     def complete(self, messages, tools, on_retry=None):
         return self.parent.complete(messages, tools, on_retry)
 
     def spawn_child(self):
+        self.child_spawns += 1
         return self.child
 
 
@@ -192,3 +210,103 @@ def test_background_agent_completion_is_injected_next_session_turn(make_cfg):
     assert any("Background subagent completed" in str(message.get("content"))
                for message in provider.parent.requests[-1])
     assert "background child result" in session.agents_summary()
+
+
+def test_coordinator_forces_async_worker_and_xml_notification(make_cfg):
+    cfg = make_cfg(coordinator_mode=True)
+    child = BlockingChildProvider([turn(content="worker finished")])
+    provider = ParentChildProvider(
+        [
+            turn(calls=[
+                ("a1", "agent", '{"description":"research task","prompt":"inspect","subagent_type":null,"run_in_background":null,"fork":null}'),
+            ]),
+            turn(content="launched worker"),
+            turn(content="integrated worker result"),
+        ],
+        [],
+    )
+    provider.child = child
+    session = AgentSession.fresh(cfg, provider)
+
+    first = session.submit("coordinate this")
+    events = read_trajectory(cfg.runs_dir, first.run_id)
+    child.release.set()
+    for _ in range(100):
+        if session.background_agents.list()[0].status != "running":
+            break
+        import time
+        time.sleep(0.01)
+    second = session.submit("continue")
+
+    assert first.summary["reason"] == "completed"
+    assert second.summary["reason"] == "completed"
+    assert any(e["type"] == "run_start" and e["mode"] == "coordinator"
+               for e in events)
+    llm_request = next(e for e in events if e["type"] == "llm_request")
+    assert llm_request["tools"] == ["agent"]
+    assert any(e["type"] == "agent_background_start" and e["agent_type"] == "worker"
+               for e in events)
+    assert any("<task-notification>" in str(message.get("content"))
+               for message in provider.parent.requests[-1])
+    done = next(e for e in second.events if e["type"] == "agent_background_done")
+    child_events = read_trajectory(cfg.runs_dir, done["run_id"])
+    child_request = next(e for e in child_events if e["type"] == "llm_request")
+    assert "read_file" in child_request["tools"]
+    assert "agent" not in child_request["tools"]
+
+
+def test_coordinator_send_message_resumes_same_worker_context(make_cfg):
+    cfg = make_cfg(coordinator_mode=True)
+    child = BlockingChildProvider([
+        turn(content="first worker result with local context"),
+        turn(content="second worker used prior context"),
+    ])
+    provider = ParentChildProvider(
+        [
+            turn(calls=[
+                ("a1", "agent", '{"description":"research task","prompt":"inspect","subagent_type":null,"run_in_background":null,"fork":null,"agent_id":null}'),
+            ]),
+            turn(content="launched worker"),
+        ],
+        [],
+    )
+    provider.child = child
+    session = AgentSession.fresh(cfg, provider)
+
+    first = session.submit("coordinate this")
+    record = session.background_agents.list()[0]
+    worker_id = record.agent_id
+    child.release.set()
+    for _ in range(100):
+        if record.status != "running":
+            break
+        import time
+        time.sleep(0.01)
+    first_worker_run = record.result.run_id
+    provider.parent.turns.extend([
+        turn(calls=[
+            ("a2", "agent", '{"description":"follow up","prompt":"continue with the same findings","subagent_type":"worker","run_in_background":true,"fork":null,"agent_id":"' + worker_id + '"}'),
+        ]),
+        turn(content="resumed worker"),
+    ])
+
+    second = session.submit("ask same worker a follow-up")
+    for _ in range(100):
+        if record.status != "running":
+            break
+        import time
+        time.sleep(0.01)
+
+    assert first.summary["reason"] == "completed"
+    assert second.summary["reason"] == "completed"
+    assert provider.child_spawns == 1
+    assert len(provider.child.requests) == 2
+    second_child_request = provider.child.requests[1]
+    assert any(m.get("role") == "assistant"
+               and "first worker result with local context" in str(m.get("content"))
+               for m in second_child_request)
+    assert any("Coordinator SendMessage" in str(m.get("content"))
+               and "continue with the same findings" in str(m.get("content"))
+               for m in second_child_request)
+    assert record.resume_count == 1
+    assert record.result.run_id != first_worker_run

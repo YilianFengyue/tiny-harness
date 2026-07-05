@@ -35,6 +35,7 @@ from .context_view import (
     format_compact_result,
     format_context_summary,
 )
+from .coordinator import coordinator_status
 
 
 def run_tui(cfg: Config, provider: Provider, resume_run_id: str | None = None) -> int:
@@ -102,12 +103,13 @@ def _banner(cfg: Config, session: AgentSession, resume_run_id: str | None,
     print(f"memory:     {memory_status_line(cfg)}")
     print(f"hooks:      {hooks_status_line(cfg)}")
     print(f"context:    {context_status_line(session.context_status())}")
+    print(f"mode:       {'coordinator' if cfg.coordinator_mode else 'normal'}")
     if resume_run_id:
         print(f"resumed:    {resume_run_id}")
     elif restored_run_id:
         print(f"restored:   {restored_run_id}")
     print("-" * 64)
-    print("Commands: /help  /agents  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /auto_mode  /cost  /trace  /runs  /sessions  /exit")
+    print("Commands: /help  /agents  /context  /compact  /memory  /hooks  /settings  /features  /permissions  /auto_mode  /coordinator  /cost  /trace  /runs  /sessions  /exit")
     print("=" * 64)
 
 
@@ -136,6 +138,7 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         print("  /ask <rule> [local|project]    Add ask rule")
         print("  /mode <mode> [local|project]   Set permission mode")
         print("  /auto_mode [on|off|full|status]  Toggle automatic approval mode")
+        print("  /coordinator [on|off|status]  Toggle CH10 coordinator mode")
         print("  /exit   Quit the TUI session")
         return False
     if name == "/cost":
@@ -206,6 +209,9 @@ def _handle_command(command: str, cfg: Config, session: AgentSession) -> bool:
         return False
     if name == "/auto_mode":
         _handle_auto_mode_command(rest, cfg, session)
+        return False
+    if name == "/coordinator":
+        _handle_coordinator_command(rest, cfg, session)
         return False
 
     print(f"Unknown command: {name}. Try /help.")
@@ -340,6 +346,22 @@ def _handle_auto_mode_command(text: str, cfg: Config, session: AgentSession) -> 
     print(format_permission_context(context))
 
 
+def _handle_coordinator_command(text: str, cfg: Config, session: AgentSession) -> None:
+    raw = (text.strip() or "status").lower()
+    if raw in {"status", "?"}:
+        print(coordinator_status(cfg, session.session_id))
+        return
+    if raw in {"on", "true", "1"}:
+        cfg.coordinator_mode = True
+    elif raw in {"off", "false", "0"}:
+        cfg.coordinator_mode = False
+    else:
+        print("Usage: /coordinator [on|off|status]")
+        return
+    session.refresh_system_prompt()
+    print(coordinator_status(cfg, session.session_id))
+
+
 def _format_auto_mode_status(cfg: Config) -> str:
     if cfg.permission_mode == "bypass" and cfg.yolo:
         state = "full"
@@ -441,11 +463,15 @@ def _print_event(event: dict) -> None:
         print(f"[tool] progress {event['name']} {phase}{suffix}")
     elif t == "agent_background_start":
         fork = " fork" if event.get("fork") else ""
-        print(f"[agent] background start {event.get('agent_type')}{fork} id={event.get('agent_id')}")
+        resumed = " resumed" if event.get("resumed") else ""
+        resume = f" resume={event.get('resume_count')}" if event.get("resume_count") else ""
+        print(f"[agent] background start {event.get('agent_type')}{fork}{resumed}{resume} id={event.get('agent_id')}")
     elif t == "agent_background_done":
         fork = " fork" if event.get("fork") else ""
+        resume = f" resume={event.get('resume_count')}" if event.get("resume_count") else ""
+        resumable = " resumable" if event.get("resumable") else ""
         print(f"[agent] background done {event.get('agent_type')}{fork} "
-              f"status={event.get('status')} run={event.get('run_id')}")
+              f"status={event.get('status')}{resume}{resumable} run={event.get('run_id')}")
     elif t == "agent_start":
         print(f"[agent] start {event.get('agent_type')} run={event.get('run_id')}")
     elif t == "agent_done":

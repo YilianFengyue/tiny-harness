@@ -1,12 +1,23 @@
 """Agent tool: delegate scoped work to built-in and project sub-agents."""
 from __future__ import annotations
 
+from ..coordinator import is_coordinator_mode
 from ..agents import format_agent_listing, get_agent_definition
 from ..background_agents import BackgroundAgentManager
 from .registry import ToolContext, ToolResult, tool
 
 
-def agent_tool_description(workdir=None) -> str:
+def agent_tool_description(workdir=None, coordinator_mode: bool = False) -> str:
+    if coordinator_mode:
+        return (
+            "Coordinator-only worker launcher. Use this to spawn asynchronous "
+            "workers for research, implementation, or verification, or to send "
+            "a follow-up message to an existing stopped worker by passing its "
+            "agent_id. In Coordinator mode use subagent_type=worker (or null, "
+            "which defaults to worker); workers run in the background and "
+            "report back through <task-notification>. Worker prompts must be "
+            "self-contained with specific files, facts, and acceptance criteria."
+        )
     return (
         "Launch a specialized sub-agent for complex multi-step work. "
         "Available subagent_type values for the current workspace:\n"
@@ -64,6 +75,13 @@ AGENT_TOOL_DESCRIPTION = (
                     "the sub-agent before the delegated prompt."
                 ),
             },
+            "agent_id": {
+                "type": ["string", "null"],
+                "description": (
+                    "Coordinator mode only: existing worker id to resume via "
+                    "SendMessage. Use null to create a new worker."
+                ),
+            },
         },
     },
     destructive=False,
@@ -71,7 +89,8 @@ AGENT_TOOL_DESCRIPTION = (
 def agent_tool(ctx: ToolContext, description: str, prompt: str,
                subagent_type: str | None = None,
                run_in_background: bool | None = None,
-               fork: bool | None = None) -> ToolResult:
+               fork: bool | None = None,
+               agent_id: str | None = None) -> ToolResult:
     if ctx.runtime.agent_depth > 0:
         return ToolResult(
             "Sub-agents cannot launch other sub-agents in this milestone. "
@@ -81,6 +100,67 @@ def agent_tool(ctx: ToolContext, description: str, prompt: str,
         )
     cfg = ctx.runtime.config
     workdir = getattr(cfg, "workdir", None)
+    coordinator = is_coordinator_mode(cfg)
+    if coordinator:
+        if subagent_type not in {None, "worker"}:
+            return ToolResult(
+                "Coordinator mode can only launch subagent_type='worker'. "
+                "Rewrite the worker prompt as a self-contained task and call "
+                "agent again with subagent_type='worker'.",
+                ok=False,
+                error_kind="coordinator_worker_required",
+            )
+        subagent_type = "worker"
+        run_in_background = True
+        if agent_id:
+            manager = _background_manager(ctx)
+            record, error = manager.send_message(
+                agent_id,
+                prompt,
+                ctx,
+                description=description,
+                emit=None,
+            )
+            if error:
+                return ToolResult(
+                    f"ERROR: {error}. Use /agents or the latest "
+                    "<task-notification><task-id> value to choose a completed "
+                    "resumable worker, or call agent with agent_id=null to "
+                    "launch a new worker.",
+                    ok=False,
+                    error_kind="coordinator_send_message_failed",
+                )
+            if record is None:
+                return ToolResult(
+                    f"ERROR: unknown worker agent_id {agent_id!r}.",
+                    ok=False,
+                    error_kind="coordinator_send_message_failed",
+                )
+            ctx.progress(
+                type="agent_background_start",
+                agent_id=record.agent_id,
+                agent_type=record.agent_type,
+                description=description,
+                fork=record.fork,
+                mode="coordinator",
+                resumed=True,
+                resume_count=record.resume_count,
+            )
+            return ToolResult(
+                "Worker resumed with Coordinator SendMessage.\n"
+                f"agent_id: {record.agent_id}\n"
+                f"agent_type: {record.agent_type}\n"
+                f"resume_count: {record.resume_count}\n"
+                "The parent conversation will receive a task-notification "
+                "when this resumed run completes.",
+            )
+    elif agent_id:
+        return ToolResult(
+            "agent_id resume is only available in Coordinator mode. "
+            "Use run_in_background/fork for CH09-style sub-agents.",
+            ok=False,
+            error_kind="agent_resume_requires_coordinator",
+        )
     agent = get_agent_definition(subagent_type, workdir)
     if agent is None:
         return ToolResult(
@@ -117,12 +197,17 @@ def agent_tool(ctx: ToolContext, description: str, prompt: str,
             agent_type=agent.agent_type,
             description=description,
             fork=bool(fork),
+            mode="coordinator" if coordinator else "normal",
+            resumed=False,
+            resume_count=record.resume_count,
         )
+        mode_line = "mode: coordinator\n" if coordinator else ""
         return ToolResult(
             f"Background subagent launched.\n"
             f"agent_id: {record.agent_id}\n"
             f"agent_type: {agent.agent_type}\n"
             f"fork: {bool(fork)}\n"
+            f"{mode_line}"
             "The parent conversation will receive a notification when it completes. "
             "Use /agents in the TUI to inspect background agents.",
         )

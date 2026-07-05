@@ -8,9 +8,10 @@ from .agents import AgentDefinition, agent_tool_names, agent_tool_schemas
 from .cancel import CancellationToken
 from .config import Config, load_pricing
 from .context import ContextManager
+from .coordinator import is_coordinator_mode, worker_context
 from .loop import TerminalState, _run_agent_events, build_initial_messages
 from .providers.base import Provider
-from .telemetry import CostLedger, RunLogger, Usage
+from .telemetry import CostLedger, RunLogger, Usage, new_run_id
 from .tools.registry import ToolContext, ToolRuntimeState
 
 SubagentEventCallback = Callable[[dict], None]
@@ -43,11 +44,24 @@ class SubagentRunResult:
         )
 
 
-def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
-                 *, description: str,
-                 emit: SubagentEventCallback | None = None,
-                 cancel_token: CancellationToken | None = None,
-                 fork_messages: list[dict] | None = None) -> SubagentRunResult:
+@dataclass
+class SubagentRuntime:
+    agent: AgentDefinition
+    description: str
+    agent_id: str
+    child_cfg: Config
+    child_provider: Provider
+    tool_runtime: ToolRuntimeState
+    messages: list[dict]
+    context_manager: ContextManager
+    resume_count: int = 0
+
+
+def create_subagent_runtime(agent: AgentDefinition, prompt: str,
+                            parent_ctx: ToolContext, *,
+                            description: str,
+                            fork_messages: list[dict] | None = None,
+                            agent_id: str | None = None) -> SubagentRuntime:
     cfg = parent_ctx.runtime.config
     provider = parent_ctx.runtime.provider
     if not isinstance(cfg, Config):
@@ -57,62 +71,27 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
 
     child_provider = provider.spawn_child()
     child_cfg = _child_config(cfg, agent)
-    logger = RunLogger(child_cfg.runs_dir)
-    agent_id = logger.run_id
-
-    def forward(event: dict) -> None:
-        if emit:
-            emit(event)
-        if parent_ctx.runtime.event_callback:
-            parent_ctx.runtime.event_callback(event)
-
-    forward({
-        "type": "agent_start",
-        "agent_id": agent_id,
-        "agent_type": agent.agent_type,
-        "description": description,
-        "prompt": prompt,
-        "run_id": logger.run_id,
-        "fork": bool(fork_messages),
-        "tools": sorted(agent_tool_names(agent)),
-    })
-
+    child_agent_id = agent_id or new_run_id()
     child_runtime = ToolRuntimeState(
         permission_context=parent_ctx.runtime.permission_context,
         permission_resolver=parent_ctx.runtime.permission_resolver,
         config=child_cfg,
         provider=child_provider,
-        agent_id=agent_id,
+        agent_id=child_agent_id,
         agent_type=agent.agent_type,
         agent_depth=parent_ctx.runtime.agent_depth + 1,
         allowed_tools=agent_tool_names(agent),
         disallowed_tools=set(agent.disallowed_tools) | {"agent"},
         require_read_only_tools=agent.require_read_only_tools,
-        event_callback=forward,
-    )
-    child_ctx = ToolContext(
-        child_cfg.workdir,
-        child_cfg.bash_timeout,
-        child_cfg.tool_output_limit,
-        cancel_token=cancel_token,
-        runtime=child_runtime,
     )
     messages = _initial_messages(prompt, child_cfg, fork_messages)
-    messages[0]["content"] = (
-        str(messages[0].get("content") or "")
-        + "\n\n# Subagent role\n"
-        + agent.system_prompt
-        + "\n\nYou are running as a sub-agent. Do not call the agent tool. "
-          "Return a concise final report for the parent agent."
-        + (
-            "\n\n# Fork context\nYou inherited a snapshot of the parent conversation. "
-            "Treat inherited content as historical context, not ground truth. "
-            "Before editing or verifying current files, re-read them from disk."
-            if fork_messages else ""
-        )
+    _apply_subagent_system_prompt(
+        messages,
+        agent,
+        parent_cfg=cfg,
+        parent_agent_id=parent_ctx.runtime.agent_id,
+        fork=bool(fork_messages),
     )
-
-    ledger = CostLedger(load_pricing())
     cm = ContextManager(
         child_cfg.context_budget,
         child_cfg.context_keep_recent,
@@ -120,6 +99,90 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
         child_cfg.tool_result_budget_chars,
         child_cfg.max_completion_tokens or 20_000,
     )
+    return SubagentRuntime(
+        agent=agent,
+        description=description,
+        agent_id=child_agent_id,
+        child_cfg=child_cfg,
+        child_provider=child_provider,
+        tool_runtime=child_runtime,
+        messages=messages,
+        context_manager=cm,
+    )
+
+
+def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
+                 *, description: str,
+                 emit: SubagentEventCallback | None = None,
+                 cancel_token: CancellationToken | None = None,
+                 fork_messages: list[dict] | None = None) -> SubagentRunResult:
+    runtime = create_subagent_runtime(
+        agent,
+        prompt,
+        parent_ctx,
+        description=description,
+        fork_messages=fork_messages,
+    )
+    return run_subagent_runtime(
+        runtime,
+        prompt,
+        parent_ctx,
+        description=description,
+        emit=emit,
+        cancel_token=cancel_token,
+        fork=bool(fork_messages),
+    )
+
+
+def run_subagent_runtime(runtime: SubagentRuntime, prompt: str,
+                         parent_ctx: ToolContext, *,
+                         description: str | None = None,
+                         emit: SubagentEventCallback | None = None,
+                         cancel_token: CancellationToken | None = None,
+                         fork: bool = False) -> SubagentRunResult:
+    cfg = parent_ctx.runtime.config
+    if not isinstance(cfg, Config):
+        raise RuntimeError("agent tool requires runtime.config")
+    agent = runtime.agent
+    child_cfg = runtime.child_cfg
+    child_provider = runtime.child_provider
+    logger = RunLogger(child_cfg.runs_dir)
+    description = description or runtime.description
+
+    def forward(event: dict) -> None:
+        if emit:
+            emit(event)
+        if parent_ctx.runtime.event_callback:
+            parent_ctx.runtime.event_callback(event)
+
+    runtime.tool_runtime.permission_context = parent_ctx.runtime.permission_context
+    runtime.tool_runtime.permission_resolver = parent_ctx.runtime.permission_resolver
+    runtime.tool_runtime.config = child_cfg
+    runtime.tool_runtime.provider = child_provider
+    runtime.tool_runtime.event_callback = forward
+
+    forward({
+        "type": "agent_start",
+        "agent_id": runtime.agent_id,
+        "agent_type": agent.agent_type,
+        "description": description,
+        "prompt": prompt,
+        "run_id": logger.run_id,
+        "fork": bool(fork),
+        "resume_count": runtime.resume_count,
+        "tools": sorted(agent_tool_names(agent)),
+    })
+
+    child_ctx = ToolContext(
+        child_cfg.workdir,
+        child_cfg.bash_timeout,
+        child_cfg.tool_output_limit,
+        cancel_token=cancel_token,
+        runtime=runtime.tool_runtime,
+    )
+
+    ledger = CostLedger(load_pricing())
+    cm = runtime.context_manager
     schemas = agent_tool_schemas(agent)
     events = _run_agent_events(
         prompt,
@@ -129,8 +192,8 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
         ledger,
         cm,
         child_ctx,
-        messages,
-        session_id=parent_ctx.runtime.agent_id,
+        runtime.messages,
+        session_id=runtime.agent_id,
         cancel_token=cancel_token,
     )
 
@@ -147,7 +210,7 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
             tool_count += 1
             forward({
                 "type": "agent_progress",
-                "agent_id": agent_id,
+                "agent_id": runtime.agent_id,
                 "agent_type": agent.agent_type,
                 "phase": "tool_start",
                 "tool_name": event.get("name"),
@@ -160,7 +223,7 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
     summary = logger.finish(terminal.reason, terminal.turns, ledger, terminal.final_message)
     usage = _usage_from_dict(summary["usage_total"])
     result = SubagentRunResult(
-        agent_id=agent_id,
+        agent_id=runtime.agent_id,
         agent_type=agent.agent_type,
         run_id=logger.run_id,
         status=summary["reason"],
@@ -173,11 +236,12 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
     )
     forward({
         "type": "agent_done" if result.status == "completed" else "agent_error",
-        "agent_id": agent_id,
+        "agent_id": runtime.agent_id,
         "agent_type": agent.agent_type,
         "run_id": logger.run_id,
         "status": result.status,
-        "fork": bool(fork_messages),
+        "fork": bool(fork),
+        "resume_count": runtime.resume_count,
         "turns": result.turns,
         "tool_count": result.tool_count,
         "cost_usd": round(result.cost_usd, 6),
@@ -187,10 +251,28 @@ def run_subagent(agent: AgentDefinition, prompt: str, parent_ctx: ToolContext,
     return result
 
 
+def append_resume_message(runtime: SubagentRuntime, prompt: str) -> None:
+    runtime.resume_count += 1
+    runtime.messages.append({
+        "role": "user",
+        "content": (
+            "[Coordinator SendMessage]\n"
+            "Continue from your existing worker context and tool state. "
+            "Handle this follow-up message:\n"
+            f"{prompt}"
+        ),
+    })
+
+
 def _child_config(cfg: Config, agent: AgentDefinition) -> Config:
     max_turns = agent.max_turns if agent.max_turns is not None else cfg.max_turns
     model = agent.model or cfg.model
-    return replace(cfg, model=model, max_turns=min(max_turns, cfg.max_turns))
+    return replace(
+        cfg,
+        model=model,
+        max_turns=min(max_turns, cfg.max_turns),
+        coordinator_mode=False,
+    )
 
 
 def _initial_messages(prompt: str, cfg: Config,
@@ -209,6 +291,29 @@ def _initial_messages(prompt: str, cfg: Config,
         ),
     })
     return messages
+
+
+def _apply_subagent_system_prompt(messages: list[dict], agent: AgentDefinition,
+                                  *, parent_cfg: Config,
+                                  parent_agent_id: str | None,
+                                  fork: bool) -> None:
+    messages[0]["content"] = (
+        str(messages[0].get("content") or "")
+        + "\n\n# Subagent role\n"
+        + agent.system_prompt
+        + "\n\nYou are running as a sub-agent. Do not call the agent tool. "
+          "Return a concise final report for the parent agent."
+        + (
+            worker_context(parent_cfg, parent_agent_id)
+            if is_coordinator_mode(parent_cfg) else ""
+        )
+        + (
+            "\n\n# Fork context\nYou inherited a snapshot of the parent conversation. "
+            "Treat inherited content as historical context, not ground truth. "
+            "Before editing or verifying current files, re-read them from disk."
+            if fork else ""
+        )
+    )
 
 
 def _copy_message(message: dict) -> dict:

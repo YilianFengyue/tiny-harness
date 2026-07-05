@@ -993,6 +993,8 @@ function renderRunStart(ev){
       '<span>model <b>' + escapeHtml(ev.model || '—') + '</b></span>' +
       '<span>workdir <b>' + escapeHtml(ev.workdir || '—') + '</b></span>' +
       '<span>sdk <b>' + escapeHtml(ev.sdk_version || '—') + '</b></span>' +
+      (ev.mode ? '<span>mode <b>' + escapeHtml(ev.mode) + '</b></span>' : '') +
+      (ev.scratchpad ? '<span>scratchpad <b>' + escapeHtml(ev.scratchpad) + '</b></span>' : '') +
     '</div>' +
     (skills.length
       ? '<div class="kv" style="margin-top:5px;align-items:center"><span>skills</span><span class="skills">' +
@@ -1198,7 +1200,12 @@ function renderAgentEvent(ev){
   if (ev.phase) bits.push('<span class="sub">phase ' + escapeHtml(String(ev.phase)) + '</span>');
   if (ev.tool_name) bits.push('<span class="sub">tool ' + escapeHtml(String(ev.tool_name)) + '</span>');
   if (ev.fork) bits.push('<span class="badge">fork</span>');
+  if (ev.resumed) bits.push('<span class="badge">resumed</span>');
+  if (ev.resumable) bits.push('<span class="badge">resumable</span>');
+  if (ev.resume_count) bits.push('<span class="sub">resume ' + escapeHtml(String(ev.resume_count)) + '</span>');
   if (ev.type.indexOf('background') >= 0) bits.push('<span class="badge">background</span>');
+  if (ev.type === 'agent_background_done') bits.push('<span class="badge">task-notification</span>');
+  if (ev.mode) bits.push('<span class="badge">' + escapeHtml(String(ev.mode)) + '</span>');
   if (ev.trajectory_path) bits.push('<span class="sub">trajectory ' + escapeHtml(String(ev.trajectory_path)) + '</span>');
   if (ev.error) bits.push('<span class="sub">error ' + escapeHtml(String(ev.error)) + '</span>');
   div.innerHTML = bits.join(' ');

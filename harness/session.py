@@ -20,13 +20,15 @@ from .loop import (
     _run_agent_events,
     build_initial_messages,
     build_resume_messages,
+    refresh_system_message,
+    tool_schemas_for_config,
 )
 from .memory_extract import MemoryExtractionController
 from .providers.base import Provider
 from .session_store import latest_workspace_session, upsert_workspace_session
 from .state import AppState, Store, build_app_state, create_store
 from .telemetry import CostLedger, RunLogger, Usage, new_run_id, read_trajectory
-from .tools import ToolContext, openai_tool_schemas
+from .tools import ToolContext
 
 EventCallback = Callable[[dict], None]
 
@@ -70,16 +72,23 @@ class AgentSession:
 
     @classmethod
     def fresh(cls, cfg: Config, provider: Provider) -> "AgentSession":
-        return cls(cfg=cfg, provider=provider,
+        session_id = new_run_id()
+        return cls(cfg=cfg, provider=provider, session_id=session_id,
                    messages=build_initial_messages("", cfg)[:1])
 
     @classmethod
     def from_run(cls, cfg: Config, provider: Provider, run_id: str) -> "AgentSession":
         events = read_trajectory(cfg.runs_dir, run_id)
+        mode = _mode_from_events(events)
+        if mode == "coordinator":
+            cfg.coordinator_mode = True
+        elif mode == "normal":
+            cfg.coordinator_mode = False
         session_id = _session_id_from_events(events)
         session = cls(cfg=cfg, provider=provider,
                       session_id=session_id or new_run_id(),
                       messages=build_resume_messages(events))
+        refresh_system_message(session.messages, cfg, session.session_id)
         if session.memory_controller:
             session.memory_controller.state.last_processed_index = len(session.messages)
         session.last_run_id = run_id
@@ -108,6 +117,7 @@ class AgentSession:
 
     def submit(self, user_text: str, on_event: EventCallback | None = None) -> SessionTurn:
         """Run one user message inside this persistent session."""
+        refresh_system_message(self.messages, self.cfg, self.session_id)
         self.turns_submitted += 1
         self.messages.append({"role": "user", "content": user_text})
         self._set_status("running")
@@ -122,7 +132,7 @@ class AgentSession:
         tool_ctx.runtime.permission_context = self.permission_context
         tool_ctx.runtime.permission_resolver = self.permission_resolver
         tool_ctx.runtime.background_agents = self.background_agents
-        schemas = openai_tool_schemas(self.cfg.workdir)
+        schemas = tool_schemas_for_config(self.cfg)
         logger = RunLogger(self.cfg.runs_dir)
         self.last_run_id = logger.run_id
 
@@ -161,6 +171,9 @@ class AgentSession:
         self.persist_index()
         self._refresh_app_state(status=summary["reason"])
         return SessionTurn(run_id=logger.run_id, summary=summary, events=events)
+
+    def refresh_system_prompt(self) -> None:
+        refresh_system_message(self.messages, self.cfg, self.session_id)
 
     def extract_memory(self, *, force: bool = True,
                        on_event: EventCallback | None = None) -> list[dict]:
@@ -278,6 +291,13 @@ def _session_id_from_events(events: list[dict]) -> str | None:
     for event in events:
         if event.get("type") == "run_start" and event.get("session_id"):
             return str(event["session_id"])
+    return None
+
+
+def _mode_from_events(events: list[dict]) -> str | None:
+    for event in events:
+        if event.get("type") == "run_start" and event.get("mode"):
+            return str(event["mode"])
     return None
 
 

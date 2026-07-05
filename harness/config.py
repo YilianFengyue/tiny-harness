@@ -79,6 +79,7 @@ class Config:
     max_retries: int = 5
     yolo: bool = False                 # True 时跳过危险命令确认
     permission_mode: str = "default"   # default/plan/acceptEdits/bypass/dontAsk
+    coordinator_mode: bool = False     # CH10: main agent orchestrates workers only
     skills: list[str] = field(default_factory=list)
     runs_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "runs")
     settings_path: Path | None = None
@@ -149,12 +150,14 @@ def _apply_settings(cfg: Config, settings: dict[str, Any]) -> None:
         "max_retries": "max_retries",
         "yolo": "yolo",
         "permission_mode": "permission_mode",
+        "coordinator_mode": "coordinator_mode",
         "skills": "skills",
     }
     aliases = {
         "max_cost": "max_cost_usd",
         "keep_recent": "context_keep_recent",
         "permissionMode": "permission_mode",
+        "coordinatorMode": "coordinator_mode",
     }
     for key, attr in {**mapping, **aliases}.items():
         if key in settings:
@@ -173,6 +176,8 @@ def _apply_env(cfg: Config) -> None:
     cfg.model = os.environ.get("TINY_HARNESS_MODEL", cfg.model)
     cfg.permission_mode = os.environ.get("TINY_HARNESS_PERMISSION_MODE",
                                          cfg.permission_mode)
+    if os.environ.get("TINY_HARNESS_COORDINATOR_MODE"):
+        cfg.coordinator_mode = _as_bool(os.environ["TINY_HARNESS_COORDINATOR_MODE"])
     if os.environ.get("TINY_HARNESS_MAX_TURNS"):
         cfg.max_turns = int(os.environ["TINY_HARNESS_MAX_TURNS"])
     if os.environ.get("TINY_HARNESS_MAX_COST"):

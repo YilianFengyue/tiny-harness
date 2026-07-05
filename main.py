@@ -53,6 +53,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--permission-mode", default=None,
                    choices=["default", "plan", "acceptEdits", "bypass", "dontAsk"],
                    help="权限模式：default/plan/acceptEdits/bypass/dontAsk")
+    coordinator = p.add_mutually_exclusive_group()
+    coordinator.add_argument("--coordinator", dest="coordinator_mode",
+                             action="store_true", default=None,
+                             help="启用 CH10 Coordinator 模式（主 agent 只编排 worker）")
+    coordinator.add_argument("--no-coordinator", dest="coordinator_mode",
+                             action="store_false",
+                             help="关闭 CH10 Coordinator 模式")
     p.add_argument("--tui", default="textual", choices=["textual", "simple"],
                    help="chat 前端：textual=Rich/Textual GUI，simple=无依赖 REPL")
     return p.parse_args(argv)
@@ -88,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             "skills": args.skill,
             "yolo": args.yolo,
             "permission_mode": args.permission_mode,
+            "coordinator_mode": args.coordinator_mode,
             "settings_path": args.settings,
             "setting_sources": args.setting_sources,
         })
@@ -122,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         "max_completion_tokens": args.max_completion_tokens,
         "skills": args.skill, "yolo": args.yolo,
         "permission_mode": args.permission_mode,
+        "coordinator_mode": args.coordinator_mode,
         "settings_path": args.settings,
         "setting_sources": args.setting_sources,
     })

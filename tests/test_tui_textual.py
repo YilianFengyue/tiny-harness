@@ -9,6 +9,7 @@ from harness.tui_textual import (
     _render_build_activity,
     _render_build_detail_footer,
     _render_permission_request,
+    _restore_builds_from_events,
     _latest_build,
     _tool_title,
 )
@@ -170,6 +171,7 @@ def test_tui_slash_menu_includes_settings_and_features():
     context = _command_matches("/con")
     compact = _command_matches("/com")
     auto_mode = _command_matches("/auto")
+    coordinator = _command_matches("/coord")
 
     assert settings and settings[0][0].startswith("/settings")
     assert agents and agents[0][0].startswith("/agents")
@@ -179,6 +181,7 @@ def test_tui_slash_menu_includes_settings_and_features():
     assert context and context[0][0].startswith("/context")
     assert compact and compact[0][0].startswith("/compact")
     assert auto_mode and auto_mode[0][0].startswith("/auto_mode")
+    assert coordinator and coordinator[0][0].startswith("/coordinator")
 
 
 def test_context_pill_renders_circle_percentage():
@@ -288,3 +291,42 @@ def test_build_detail_footer_advertises_build_navigation():
     assert "2/3" in rendered
     assert "Prev Build" in rendered
     assert "Next Build" in rendered
+
+
+def test_restore_builds_from_trajectory_events_rehydrates_build_details():
+    class Ui:
+        id = 1
+        build_seq = 0
+        builds: list[BuildActivity] = []
+        records: list[UiRecord] = []
+        activities: dict[str, ToolActivity] = {}
+        audit_events: list[dict] = []
+        current_build = None
+
+    ui = Ui()
+    events = [
+        {"type": "run_start", "run_id": "run-1", "ts": "2026-07-05T00:00:00+00:00",
+         "model": "gpt-test"},
+        {"type": "assistant_delta", "turn": 1, "ts": "2026-07-05T00:00:01+00:00",
+         "reasoning_content": "Need to run a check."},
+        {"type": "tool_call", "turn": 1, "ts": "2026-07-05T00:00:02+00:00",
+         "tool_call_id": "c1", "name": "bash",
+         "arguments": {"command": "python -m pytest -q"}},
+        {"type": "tool_result", "turn": 1, "ts": "2026-07-05T00:00:03+00:00",
+         "tool_call_id": "c1", "name": "bash", "ok": True,
+         "result": "5 passed", "duration_ms": 100},
+        {"type": "run_end", "run_id": "run-1", "ts": "2026-07-05T00:00:04+00:00",
+         "reason": "completed"},
+    ]
+
+    _restore_builds_from_events(ui, events, "fallback-model")
+
+    build = _latest_build(ui)
+    assert build is not None
+    assert build.run_id == "run-1"
+    assert build.status == "completed"
+    assert build.finished_at is not None
+    assert build.tool_ids == ["c1"]
+    assert "Need to run" in build.thinking
+    assert ui.activities["c1"].result_preview == "5 passed"
+    assert any(record.kind == "build_activity" for record in ui.records)

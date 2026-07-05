@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -29,6 +30,7 @@ from .permissions import (
 from .providers.base import Provider
 from .session import AgentSession
 from .session_store import list_workspace_sessions
+from .telemetry import read_trajectory
 from .lifecycle_hooks import format_hooks_summary, hooks_status_line
 from .memory_view import (
     add_memory_from_text,
@@ -52,6 +54,7 @@ from .context_view import (
     format_compact_result,
     format_context_summary,
 )
+from .coordinator import coordinator_status
 
 try:  # pragma: no cover - UI smoke-tested with Textual's headless runner.
     from rich.console import Group
@@ -195,6 +198,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("/ask <rule> [session|local|project]", "add an ask rule"),
     ("/mode <mode> [session|local|project]", "set permission mode"),
     ("/auto_mode [on|off|full|status]", "toggle automatic approval mode"),
+    ("/coordinator [on|off|status]", "toggle CH10 coordinator mode"),
     ("/theme", "choose a theme"),
     ("/exit", "quit"),
 )
@@ -925,6 +929,8 @@ if _TUI_IMPORT_ERROR is None:
             ))
             if resume_run_id:
                 ui.records.append(UiRecord("system", f"resumed run {resume_run_id}", "system"))
+                ui.records.extend(_records_from_messages(agent.messages))
+                _restore_builds_from_run(ui, self.cfg)
             elif restored_from_workspace:
                 ui.records.append(UiRecord(
                     "system",
@@ -932,6 +938,7 @@ if _TUI_IMPORT_ERROR is None:
                     "system",
                 ))
                 ui.records.extend(_records_from_messages(agent.messages))
+                _restore_builds_from_run(ui, self.cfg)
             self.sessions[sid] = ui
             self.current_id = sid
             return ui
@@ -1249,6 +1256,9 @@ if _TUI_IMPORT_ERROR is None:
             if name == "/auto_mode":
                 self._handle_auto_mode_command(rest)
                 return
+            if name == "/coordinator":
+                self._handle_coordinator_command(rest)
+                return
             self._add_system(f"Unknown command: {name}. Try /help.")
 
         def _open_build_command(self, text: str) -> None:
@@ -1373,6 +1383,26 @@ if _TUI_IMPORT_ERROR is None:
             self.cfg.yolo = yolo
             self._add_system(_format_auto_mode_status(self.cfg) + "\n\n" + format_permission_context(context))
 
+        def _handle_coordinator_command(self, text: str) -> None:
+            raw = (text.strip() or "status").lower()
+            current = self._current()
+            if raw in {"status", "?"}:
+                self._add_system(coordinator_status(self.cfg, current.agent.session_id))
+                return
+            if raw in {"on", "true", "1"}:
+                self.cfg.coordinator_mode = True
+            elif raw in {"off", "false", "0"}:
+                self.cfg.coordinator_mode = False
+            else:
+                self._add_system("Usage: /coordinator [on|off|status]")
+                return
+            current.agent.refresh_system_prompt()
+            state = "enabled" if self.cfg.coordinator_mode else "disabled"
+            self._add_system(
+                f"Coordinator mode {state}.\n\n"
+                + coordinator_status(self.cfg, current.agent.session_id)
+            )
+
         def _apply_theme(self, theme: str | None) -> None:
             if theme:
                 self.theme = theme
@@ -1449,6 +1479,132 @@ def _records_from_messages(messages: list[dict]) -> list[UiRecord]:
             continue
         records.append(UiRecord(str(role), content))
     return records[-80:]
+
+
+def _restore_builds_from_run(ui: UiSession, cfg: Config) -> None:
+    run_id = ui.agent.last_run_id
+    if not run_id:
+        return
+    try:
+        events = read_trajectory(cfg.runs_dir, run_id)
+    except (OSError, json.JSONDecodeError):
+        return
+    _restore_builds_from_events(ui, events, cfg.model)
+
+
+def _restore_builds_from_events(ui: UiSession, events: list[dict],
+                                default_model: str) -> None:
+    if not events:
+        return
+
+    run_id = _trajectory_run_id(events)
+    model = _trajectory_model(events) or default_model
+    run_status = _trajectory_run_status(events) or "restored"
+    final_ts = _trajectory_final_ts(events)
+    restored: dict[int, BuildActivity] = {}
+
+    def build_for(event: dict) -> BuildActivity:
+        turn = _event_turn(event)
+        build = restored.get(turn)
+        if build is None:
+            ui.build_seq += 1
+            build = BuildActivity(f"build-{ui.id}-{ui.build_seq}", model=model)
+            build.request_turn = turn
+            build.run_id = run_id
+            build.started_at = _event_ts(event) or final_ts or build.started_at
+            restored[turn] = build
+        return build
+
+    for event in events:
+        event = dict(event)
+        kind = event.get("type")
+        if kind == "assistant_delta":
+            reasoning = str(event.get("reasoning_content") or "")
+            if reasoning:
+                build_for(event).thinking += reasoning
+        elif kind == "llm_response":
+            if event.get("tool_calls"):
+                build = build_for(event)
+                build.phase = "tools"
+                build.status = "running tools"
+            elif event.get("finish_reason") and _event_turn(event) in restored:
+                restored[_event_turn(event)].status = str(event.get("finish_reason"))
+        elif kind in TOOL_EVENT_TYPES:
+            build = build_for(event)
+            build.audit.append(event)
+            activity = _fold_tool_event(ui.activities, event)
+            if activity:
+                if activity.call_id not in build.tool_ids:
+                    build.tool_ids.append(activity.call_id)
+                build.current_tool = _tool_title(activity)
+                build.phase = "permission" if activity.permission == "waiting" else "tools"
+                build.status = _activity_status(activity)
+
+    for build in restored.values():
+        if not _build_has_details(build):
+            continue
+        build.finished_at = final_ts or build.started_at
+        build.phase = "done" if run_status == "completed" else "stopped"
+        build.status = run_status
+        ui.builds.append(build)
+        ui.records.append(UiRecord("assistant", build.id, "build_activity", {"build": build}))
+    ui.current_build = None
+    ui.audit_events.extend(dict(event) for event in events)
+
+
+def _trajectory_run_id(events: list[dict]) -> str | None:
+    for event in events:
+        if event.get("type") == "run_start" and event.get("run_id"):
+            return str(event["run_id"])
+    for event in events:
+        if event.get("run_id"):
+            return str(event["run_id"])
+    return None
+
+
+def _trajectory_model(events: list[dict]) -> str | None:
+    for event in events:
+        if event.get("type") == "run_start" and event.get("model"):
+            return str(event["model"])
+    for event in events:
+        if event.get("model"):
+            return str(event["model"])
+    return None
+
+
+def _trajectory_run_status(events: list[dict]) -> str | None:
+    for event in reversed(events):
+        if event.get("type") == "run_end" and event.get("reason"):
+            return str(event["reason"])
+    return None
+
+
+def _trajectory_final_ts(events: list[dict]) -> float | None:
+    for event in reversed(events):
+        ts = _event_ts(event)
+        if ts is not None:
+            return ts
+    return None
+
+
+def _event_turn(event: dict) -> int:
+    try:
+        return int(event.get("turn") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def _event_ts(event: dict) -> float | None:
+    raw = event.get("ts")
+    if not raw:
+        return None
+    try:
+        text = str(raw)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 def _session_title_from_messages(messages: list[dict], sid: int) -> str:
@@ -1558,6 +1714,7 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
             "prompt": event.get("prompt"),
             "subagent_type": event.get("agent_type"),
             "fork": event.get("fork"),
+            "resume_count": event.get("resume_count"),
         }
     elif t == "agent_progress":
         activity.phase = str(event.get("phase") or "agent running")
@@ -1586,6 +1743,8 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
             "subagent_type": event.get("agent_type"),
             "fork": event.get("fork"),
             "run_in_background": True,
+            "resumed": event.get("resumed"),
+            "resume_count": event.get("resume_count"),
         }
     elif t == "agent_background_done":
         activity.phase = "done" if event.get("status") == "completed" else "error"
@@ -1598,6 +1757,10 @@ def _fold_tool_event(activities: dict[str, ToolActivity], event: dict) -> ToolAc
         activity.agent_trajectory_path = str(event.get("trajectory_path") or "")
         activity.agent_background = True
         activity.agent_fork = bool(event.get("fork", activity.agent_fork))
+        if activity.arguments is None:
+            activity.arguments = {}
+        activity.arguments["resumable"] = event.get("resumable")
+        activity.arguments["resume_count"] = event.get("resume_count")
         activity.result_preview = _compact(str(event.get("final_message") or event.get("error") or ""), 1200)
     return activity
 
@@ -2055,6 +2218,7 @@ def _agent_style(agent_type: str | None) -> str:
         "plan": "green",
         "general": "yellow",
         "verify": "red",
+        "worker": "magenta",
     }.get(agent_type or "", "magenta")
 
 
@@ -2136,7 +2300,8 @@ def _command_matches(text: str) -> list[tuple[str, str]]:
 
 def _footer_line(ui: UiSession, cfg: Config) -> str:
     build = _latest_build(ui)
-    left = f"Build | {cfg.model} | {cfg.permission_mode}"
+    mode = "coordinator" if cfg.coordinator_mode else "normal"
+    left = f"Build | {cfg.model} | {cfg.permission_mode} | {mode}"
     if build and build.running:
         left += f" | {build.status}"
     tokens = ui.agent.usage_total.as_dict()

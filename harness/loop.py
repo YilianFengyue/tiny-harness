@@ -25,6 +25,13 @@ from .background_agents import BackgroundAgentManager, notification_message
 from .compact import compact_conversation
 from .config import Config, load_pricing
 from .context import ContextManager, strip_internal_marks
+from .coordinator import (
+    COORDINATOR_ALLOWED_TOOLS,
+    coordinator_system_prompt,
+    ensure_scratchpad_dir,
+    filter_coordinator_tools,
+    is_coordinator_mode,
+)
 from .hooks import (
     denial_message,
     evaluate_tool_permission,
@@ -102,11 +109,39 @@ class AgentState:
 
 
 def build_initial_messages(task: str, cfg: Config) -> list[dict]:
-    system = SYSTEM_PROMPT.format(workdir=cfg.workdir,
-                                  skills=render_skills_section(cfg.skills))
-    system += render_memory_prompt(cfg)
+    skills = render_skills_section(cfg.skills)
+    memory = render_memory_prompt(cfg)
+    if is_coordinator_mode(cfg):
+        system = coordinator_system_prompt(cfg, None, skills=skills, memory=memory)
+    else:
+        system = SYSTEM_PROMPT.format(workdir=cfg.workdir, skills=skills)
+        system += memory
     return [{"role": "system", "content": system},
             {"role": "user", "content": task}]
+
+
+def refresh_system_message(messages: list[dict], cfg: Config,
+                           session_id: str | None = None) -> None:
+    skills = render_skills_section(cfg.skills)
+    memory = render_memory_prompt(cfg)
+    if is_coordinator_mode(cfg):
+        content = coordinator_system_prompt(cfg, session_id, skills=skills, memory=memory)
+    else:
+        content = SYSTEM_PROMPT.format(workdir=cfg.workdir, skills=skills) + memory
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = content
+    else:
+        messages.insert(0, {"role": "system", "content": content})
+
+
+def tool_schemas_for_config(cfg: Config) -> list[dict]:
+    schemas = openai_tool_schemas(
+        cfg.workdir,
+        coordinator_mode=is_coordinator_mode(cfg),
+    )
+    if is_coordinator_mode(cfg):
+        return filter_coordinator_tools(schemas)
+    return schemas
 
 
 def run_agent(task: str | None, cfg: Config, provider: Provider,
@@ -114,7 +149,9 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
     """跑一个任务，返回 summary dict（同时落盘 summary.json）。"""
     cfg.workdir.mkdir(parents=True, exist_ok=True)
     messages = resume_messages or build_initial_messages(task or "", cfg)
-    schemas = openai_tool_schemas(cfg.workdir)
+    if is_coordinator_mode(cfg):
+        refresh_system_message(messages, cfg, logger.run_id)
+    schemas = tool_schemas_for_config(cfg)
     ledger = CostLedger(load_pricing())
     cm = ContextManager(cfg.context_budget, cfg.context_keep_recent,
                         cfg.context_hard_limit, cfg.tool_result_budget_chars,
@@ -123,6 +160,8 @@ def run_agent(task: str | None, cfg: Config, provider: Provider,
     tool_ctx.runtime.config = cfg
     tool_ctx.runtime.provider = provider
     tool_ctx.runtime.background_agents = BackgroundAgentManager()
+    if is_coordinator_mode(cfg):
+        tool_ctx.runtime.allowed_tools = set(COORDINATOR_ALLOWED_TOOLS)
 
     events = _run_agent_events(task, cfg, provider, schemas, ledger, cm, tool_ctx, messages)
     terminal: TerminalState | None = None
@@ -156,8 +195,14 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
         tool_ctx.runtime.config = cfg
     if tool_ctx.runtime.provider is None:
         tool_ctx.runtime.provider = provider
+    if tool_ctx.runtime.agent_id is None:
+        tool_ctx.runtime.agent_id = session_id
     if tool_ctx.runtime.background_agents is None:
         tool_ctx.runtime.background_agents = BackgroundAgentManager()
+    scratchpad_dir = None
+    if is_coordinator_mode(cfg):
+        scratchpad_dir = ensure_scratchpad_dir(cfg, session_id)
+        tool_ctx.runtime.allowed_tools = set(COORDINATOR_ALLOWED_TOOLS)
     tool_ctx.runtime.messages = state.messages
     settings_snapshot = cfg.settings_snapshot
     mem_summary = memory_summary(cfg)
@@ -174,6 +219,8 @@ def _run_agent_events(task: str | None, cfg: Config, provider: Provider,
         "sdk_version": _openai_version(),
         "skills": cfg.skills,
         "session_id": session_id,
+        "mode": "coordinator" if is_coordinator_mode(cfg) else "normal",
+        "scratchpad": str(scratchpad_dir) if scratchpad_dir else None,
         "settings_sources": [
             {"source": layer.source, "path": layer.path, "origin": layer.origin}
             for layer in settings_snapshot.sources
@@ -487,7 +534,10 @@ def _drain_background_agent_events(tool_ctx: ToolContext, messages: list[dict],
     if not isinstance(manager, BackgroundAgentManager):
         return
     for record in manager.drain_completed():
-        content = notification_message(record)
+        content = notification_message(
+            record,
+            coordinator_mode=is_coordinator_mode(tool_ctx.runtime.config),
+        )
         messages.append({"role": "user", "content": content})
         yield {
             "type": "agent_background_done",
@@ -500,6 +550,9 @@ def _drain_background_agent_events(tool_ctx: ToolContext, messages: list[dict],
             "trajectory_path": record.result.trajectory_path if record.result else None,
             "final_message": record.result.final_message if record.result else None,
             "error": record.error,
+            "resumable": record.resumable and record.runtime is not None,
+            "resume_count": record.resume_count,
+            "mode": "coordinator" if is_coordinator_mode(tool_ctx.runtime.config) else "normal",
         }
 
 
